@@ -54,8 +54,7 @@ AUTH_TOKEN = os.environ.get("LWP_WEB_TOKEN", "")  # empty = no auth (localhost o
 
 # Uploaded BloodHound archives are untrusted data: they stay in their own
 # directory, are never executed, and are only ever parsed as JSON.
-BH_UPLOADS = DEFAULT_OUTPUT / "_bh_uploads"
-BH_UPLOADS.mkdir(parents=True, exist_ok=True)
+BH_UPLOADS = DEFAULT_OUTPUT / "_bh_uploads"      # created on first upload
 BH_MAX_UPLOAD = 512 * 1024 * 1024
 
 app = Flask(__name__, static_folder=None)
@@ -498,6 +497,8 @@ def api_files():
     if p.is_dir():
         entries = []
         for child in sorted(p.iterdir()):
+            if child.parent == DEFAULT_OUTPUT and child.name == BH_UPLOADS.name:
+                continue        # internal upload storage, shown in the BloodHound tab
             try:
                 st = child.stat()
                 entries.append({
@@ -586,7 +587,7 @@ def api_bh_upload():
     # one folder per upload: a zip of loose json stays self-contained
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest_dir = BH_UPLOADS / f"{stamp}-{secrets.token_hex(3)}"
-    dest_dir.mkdir(parents=True)
+    dest_dir.mkdir(parents=True)   # parents=True also creates BH_UPLOADS
     dest = dest_dir / name
     f.save(dest)
     resp = _bh_analyse([dest], label=name)
@@ -600,6 +601,8 @@ def api_bh_upload():
 
 def _bh_prune_uploads(keep=10):
     """Keep only the most recent uploads so the folder does not grow forever."""
+    if not BH_UPLOADS.exists():
+        return
     dirs = sorted((d for d in BH_UPLOADS.iterdir() if d.is_dir()),
                   key=lambda d: d.stat().st_mtime, reverse=True)
     for d in dirs[keep:]:

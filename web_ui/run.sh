@@ -18,8 +18,6 @@ if [ -z "${LWP_WEB_TOKEN}" ]; then
   if [ "$1" == "--no-token" ]; then shift;
   else
     export LWP_WEB_TOKEN="$(openssl rand -hex 16 2>/dev/null || head -c16 /dev/urandom | xxd -p)"
-    echo "[*] Generated auth token. Open the UI with:"
-    echo "    http://127.0.0.1:8777/?token=${LWP_WEB_TOKEN}"
   fi
 fi
 

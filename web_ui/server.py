@@ -801,10 +801,19 @@ def main():
     if not LINWINPWN.exists():
         print(f"[!] WARNING: {LINWINPWN} not found - the Start button will fail "
               f"until the web_ui/ folder sits next to linWinPwn.sh.", file=sys.stderr)
-    banner_tok = AUTH_TOKEN or "(none - localhost only)"
-    print(f"[+] linWinPwn Web UI on http://{args.host}:{args.port}")
-    print(f"[+] Auth token: {banner_tok}")
-    print(f"[+] Output dir: {DEFAULT_OUTPUT}")
+    host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
+    url = f"http://{host}:{args.port}/"
+    if AUTH_TOKEN:
+        url += f"?token={AUTH_TOKEN}"
+    print()
+    print("  linWinPwn Web Console - open this in your browser:")
+    print(f"      {url}")
+    print()
+    if not AUTH_TOKEN:
+        print("  No auth token set (LWP_WEB_TOKEN). Fine on localhost only.")
+    print(f"  Output dir: {DEFAULT_OUTPUT}")
+    print("  Press Ctrl+C to stop.")
+    print()
     # threaded=True so each websocket pump + HTTP calls run concurrently.
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
 

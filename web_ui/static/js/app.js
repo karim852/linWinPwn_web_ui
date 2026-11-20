@@ -49,12 +49,13 @@ function makeTerm(elId, wsPath, opts={}) {
   term.open(qs(elId));
   setTimeout(()=>{try{fit.fit();}catch(e){}}, 30);
 
-  let ws=null, retry=null, connected=false;
+  let ws=null, retry=null, connected=false, firstMsg=true;
   function connect() {
     const proto = location.protocol==="https:"?"wss":"ws";
     ws = new WebSocket(`${proto}://${location.host}${wsPath}?token=${encodeURIComponent(TOKEN)}`);
-    ws.onopen = () => { connected=true; sendResize(); opts.onopen && opts.onopen(); };
-    ws.onmessage = ev => { term.write(ev.data); opts.onoutput && opts.onoutput(ev.data); };
+    ws.onopen = () => { connected=true; firstMsg=true; sendResize(); opts.onopen && opts.onopen(); };
+    ws.onmessage = ev => { const f = firstMsg; firstMsg = false;
+      term.write(ev.data); opts.onoutput && opts.onoutput(ev.data, f); };
     ws.onclose = () => { connected=false; opts.onclose && opts.onclose();
       if(opts.autoReconnect){ clearTimeout(retry); retry=setTimeout(connect,1500);} };
     ws.onerror = () => {};
@@ -84,7 +85,8 @@ let LINE_ACC = "";           // partial line for history parsing
 let analyzeTimer = null, consoleTimer = null;
 let PROMPT_SIG = null;       // avoid re-rendering the same prompt (keeps user typing)
 
-function onLwpOutput(data) {
+function onLwpOutput(data, isReplay) {
+  const skipFeed = isReplay && RES_RESTORED;
   const clean = data.replace(ANSI_RE, "").replace(/\r(?!\n)/g, "\n").replace(/\r/g, "");
   PLAIN = (PLAIN + clean).slice(-20000);
   // history: complete lines only
@@ -93,6 +95,7 @@ function onLwpOutput(data) {
   parts.forEach(l => {
     const m = l.match(/\[i\] (?:Running|Printing) command: (.+)$/);
     if (m) addHistory(m[1].trim());
+    if (!skipFeed) feedLine(l);
   });
   if (RUN_STATE !== "input") setRunState("running");
   clearTimeout(analyzeTimer); clearTimeout(consoleTimer);
@@ -220,6 +223,8 @@ function showChoice(block) {
 function showPanel(spec) {
   if (PROMPT_SIG === spec.sig) return;
   PROMPT_SIG = spec.sig;
+  LAST_SPEC = spec;
+  if (CUR_ENTRY && CUR_ENTRY.status === "running") { CUR_ENTRY.status = "waiting"; resMark(CUR_ENTRY); }
   const p = qs("#promptPanel");
   qs("#ppKind").textContent = {question:"question",choice:"choice",continue:"waiting",console:"console"}[spec.kind];
   qs("#ppTitle").textContent = spec.title;
@@ -257,6 +262,20 @@ function hidePanel() {
 }
 
 function answer(text) {
+  if (LAST_SPEC && LAST_SPEC.kind !== "console") {
+    if (!CUR_ENTRY) resNew("session", "Session output", "", "", 0);
+    const shown = text === "" ? (LAST_SPEC.def ? `default (${LAST_SPEC.def})` : (LAST_SPEC.kind === "continue" ? "continue" : "empty"))
+                : (LAST_SPEC.secret ? "••••••" : text);
+    const q = LAST_SPEC.title.replace(/\s*\(.*?\)\s*:?\s*$/, "").replace(/:\s*$/, "");
+    CUR_ENTRY.qa.push({q, a: shown});
+    // drop the question line itself from the output, it is shown as Q/A
+    const frag = LAST_SPEC.title.slice(0, 30);
+    for (let i = CUR_ENTRY.lines.length - 1; i >= Math.max(0, CUR_ENTRY.lines.length - 15); i--)
+      if (CUR_ENTRY.lines[i].t.includes(frag)) { CUR_ENTRY.lines.splice(i, 1); break; }
+  } else if (LAST_SPEC && CUR_ENTRY) {
+    CUR_ENTRY.lines.push({t: "› " + text, c: "info"});
+  }
+  if (CUR_ENTRY) { CUR_ENTRY.status = "running"; resMark(CUR_ENTRY); }
   lwpTerm.send(text + "\r");
   hidePanel();
   setRunState("running");
@@ -264,6 +283,7 @@ function answer(text) {
 
 function menuReady(menuId) {
   hidePanel();
+  if (CUR_ENTRY && CUR_ENTRY.seen >= CUR_ENTRY.need) resClose("done");
   CUR_MENU = menuId;
   const m = MENUS.find(x=>x.id===menuId);
   qs("#lwpCrumb").innerHTML = `menu: <b>${m ? esc(m.title) : "Main menu"}</b>`;
@@ -355,6 +375,7 @@ function keySequence(m, a) {
 async function runAction(m, a) {
   if (RUN_STATE !== "ready") return;
   const keys = keySequence(m, a);
+  resNew("action", a.label, m.title, a.key, keys.length);
   // the script will be inside this menu after the keys (confirmed again by its header)
   CUR_MENU = m.direct ? null : m.id;
   qs("#lwpCrumb").innerHTML = `menu: <b>${esc(m.direct ? "Main menu" : m.title)}</b>`;
@@ -365,6 +386,288 @@ async function runAction(m, a) {
 }
 
 function note(msg){ lwpTerm.term.write(`\r\n\x1b[33m[web] ${msg}\x1b[0m\r\n`); }
+
+
+/* ======================= Results view =======================
+   Turns the raw output into one card per action: commands run, output
+   sorted by type, the answers given in the forms, files produced.
+   Fed line by line from the same stream as the terminal. */
+let OUTPUT_DIR = "";
+let IN_MENU = false;          // inside a menu listing (not results)
+let RES = [];                 // entries and separators, oldest first
+let CUR_ENTRY = null;
+let RES_SEQ = 0;
+let RES_FILTER = "", RES_STATUS = "all";
+let LAST_SPEC = null;
+let AUTO_SECTION = "", PENDING = null, LINE_NO = 0;
+const GENERIC_FLAGS = new Set(["port","dns-server","kdcHost","log","dc-ip","dc-host","timeout","no-pass",
+  "local-auth","use-kcache","kerberos","aesKey","hashes","target-ip","output","outputfile","debug","dns-tcp"]);
+function keyFlag(cmd) {
+  const mods = [...cmd.matchAll(/(?:^|\s)-M\s+(\S+)/g)].map(m => m[1]);
+  if (mods.length) return "-M " + mods.join(", ");
+  for (const m of cmd.matchAll(/(?:^|\s)--([A-Za-z][\w-]+)/g)) if (!GENERIC_FLAGS.has(m[1])) return "--" + m[1];
+  return "";
+}
+let SESSION_ID = null, RES_RESTORED = false;
+function resSave() {
+  if (!SESSION_ID) return;
+  try {
+    const data = RES.slice(-150).map(e => {
+      const o = Object.assign({}, e); delete o.el;
+      if (o.lines) o.lines = o.lines.slice(-800);
+      return o;
+    });
+    sessionStorage.setItem("lwp.res", JSON.stringify({id: SESSION_ID, res: data,
+      cur: CUR_ENTRY ? CUR_ENTRY.id : null, seq: RES_SEQ}));
+  } catch (e) {}
+}
+function resRestore(id) {
+  try {
+    const d = JSON.parse(sessionStorage.getItem("lwp.res") || "null");
+    if (!d || d.id !== id) return false;
+    RES = d.res; RES_SEQ = d.seq || RES.length;
+    CUR_ENTRY = RES.find(e => e.id === d.cur) || null;
+    resRenderAll(); RES_RESTORED = true; return true;
+  } catch (e) { return false; }
+}
+const resDirty = new Set(); let resTimer = null;
+
+function secretValues() {
+  const c = LAST_CFG || {};
+  return [c.password, c.hash, c.aeskey, c.certpass].filter(v => v && v.length >= 3);
+}
+function mask(text) {
+  let t = String(text);
+  secretValues().forEach(v => { t = t.split(v).join("••••••"); });
+  return t;
+}
+function toolName(cmd) {
+  const tok = cmd.trim().split(/\s+/).filter(x => !/^(sudo|timeout|\d+[smh]?|-[a-zA-Z]|env|[A-Z_]+=\S*)$/.test(x));
+  const base = (tok[0] || "command").split("/").pop();
+  const sub = tok[1] && /^[a-z][a-z0-9_-]{1,14}$/.test(tok[1]) ? " " + tok[1] : "";
+  return base + sub;
+}
+function findFiles(text) {
+  if (!OUTPUT_DIR) return [];
+  const re = new RegExp(OUTPUT_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/[^\\s'\"`;|)]+", "g");
+  return (String(text).match(re) || []).map(f => f.slice(OUTPUT_DIR.length + 1).replace(/[.,:]+$/, ""));
+}
+function classify(t) {
+  if (/^\[\+\]/.test(t) || /\b(success|pwn3d!|valid credentials?)\b/i.test(t)) return "ok";
+  if (/^\[-\]/.test(t) || /\b(error|failed|failure|denied|not found|timed out|refused|missing)\b/i.test(t)) return "err";
+  if (/^\[!\]/.test(t) || /\bwarning\b/i.test(t)) return "warn";
+  if (/^\[(i|\*)\]/.test(t)) return "info";
+  return "plain";
+}
+const OL_ICON = {ok:"✓", err:"✕", warn:"!", info:"›", plain:""};
+
+function resNew(kind, label, menu, key, need) {
+  if (CUR_ENTRY && (CUR_ENTRY.status === "running" || CUR_ENTRY.status === "waiting"))
+    resClose("done");
+  RES.forEach(e => { if (e.kind && !e.userToggled) { e.open = false; resMark(e); } });
+  const e = {id: ++RES_SEQ, kind, label, menu: menu || "", key: key || "", status: "running",
+             started: Date.now(), ended: null, cmds: [], lines: [], qa: [], files: [],
+             counts: {ok:0, err:0, warn:0}, need: need || 0, seen: 0,
+             open: true, userToggled: false, showAll: false, el: null};
+  RES.push(e); CUR_ENTRY = e;
+  if (RES.length > 400) RES.splice(0, RES.length - 400).forEach(x => x.el && x.el.remove());
+  resMark(e);
+  return e;
+}
+function resClose(status) {
+  const e = CUR_ENTRY; if (!e) return;
+  if (e.status === "running" || e.status === "waiting") { e.status = status; e.ended = Date.now(); }
+  resMark(e);
+  CUR_ENTRY = null;
+}
+function resSep(text) { RES.push({sep: true, text, id: ++RES_SEQ}); resRenderAll(); }
+
+function feedLine(raw) {
+  const t = raw.replace(/\s+$/, ""), tr = t.trim();
+  if (!tr) return;
+  if (/^\[(web|web-ui)\]/.test(tr) || /^\[linWinPwn session not started/.test(tr)) return;
+  if (/\[[A-Za-z0-9 ]+ menu\]/.test(tr)) { IN_MENU = true; return; }
+  if (/^>{1,2}( |$)/.test(tr)) {                 // echo of a menu choice / answer
+    if (/^> \S/.test(tr) && CUR_ENTRY) CUR_ENTRY.seen++;
+    IN_MENU = false; return;
+  }
+  if (IN_MENU) return;
+  LINE_NO++;
+  if (/^-{5,}$/.test(tr)) return;
+  const sec = tr.match(/^\[\+\] Start: (.+)$/);
+  if (sec && (!CUR_ENTRY || CUR_ENTRY.kind !== "action")) { AUTO_SECTION = sec[1].trim(); return; }
+  const cm = tr.match(/\[i\] (?:Running|Printing) command: (.+)$/);
+  if (cm) {
+    const cmd = cm[1].trim();
+    if (!CUR_ENTRY || CUR_ENTRY.kind === "auto" || CUR_ENTRY.kind === "session") {
+      // name the card after the "[*] ..." line announced just before, else tool + key option
+      let label = "";
+      if (PENDING && LINE_NO - PENDING.no <= 2) {
+        label = PENDING.text;
+        const pe = PENDING.entry, i = pe ? pe.lines.lastIndexOf(PENDING.line) : -1;
+        if (i >= 0) { pe.lines.splice(i, 1); resMark(pe); }
+      }
+      if (!label) { const kf = keyFlag(cmd); label = toolName(cmd) + (kf ? " · " + kf : ""); }
+      PENDING = null;
+      resNew("auto", label, AUTO_SECTION, "", 0);
+    }
+    CUR_ENTRY.cmds.push(cmd);
+    findFiles(cmd).forEach(f => CUR_ENTRY.files.includes(f) || CUR_ENTRY.files.push(f));
+    resMark(CUR_ENTRY); return;
+  }
+  if (!CUR_ENTRY) resNew("session", "Session output", "", "", 0);
+  const c = classify(tr);
+  const line = {t, c};
+  CUR_ENTRY.lines.push(line);
+  if (/^\[\*\] /.test(tr) && CUR_ENTRY.kind !== "action")
+    PENDING = {text: tr.replace(/^\[\*\]\s*/, "").replace(/\.{3}$/, ""), entry: CUR_ENTRY, line, no: LINE_NO};
+  if (c in CUR_ENTRY.counts) CUR_ENTRY.counts[c]++;
+  findFiles(tr).forEach(f => CUR_ENTRY.files.includes(f) || CUR_ENTRY.files.push(f));
+  if (CUR_ENTRY.lines.length > 5000) CUR_ENTRY.lines.splice(0, 1000);
+  resMark(CUR_ENTRY);
+}
+
+/* ---- rendering ---- */
+function resMark(e) { resDirty.add(e); clearTimeout(resTimer); resTimer = setTimeout(resFlush, 90); }
+function resFlush() {
+  const list = qs("#resList");
+  resDirty.forEach(e => {
+    if (!RES.includes(e)) return;
+    if (!e.el) { e.el = document.createElement("div"); list.appendChild(e.el); }
+    resPaint(e);
+  });
+  resDirty.clear();
+  resCountUpdate();
+  resSave();
+  // keep the newest card in view if the user is near the bottom
+  if (list.scrollHeight - list.scrollTop - list.clientHeight < 220) list.scrollTop = list.scrollHeight;
+}
+function resRenderAll() {
+  const list = qs("#resList");
+  [...list.querySelectorAll(".rc,.res-sep")].forEach(n => n.remove());
+  RES.forEach(e => { e.el = null; });
+  RES.forEach(e => {
+    e.el = document.createElement("div"); list.appendChild(e.el);
+    if (e.sep) { e.el.className = "res-sep"; e.el.textContent = e.text; } else resPaint(e);
+  });
+  resCountUpdate();
+}
+function resMatches(e) {
+  if (RES_STATUS === "running" && !(e.status === "running" || e.status === "waiting")) return false;
+  if (RES_STATUS === "done" && e.status !== "done") return false;
+  if (RES_STATUS === "issues" && !(e.counts.err || e.status === "stopped")) return false;
+  if (!RES_FILTER) return true;
+  const f = RES_FILTER.toLowerCase();
+  return (e.label + " " + e.menu + " " + e.cmds.join(" ") + " " + e.lines.map(l => l.t).join(" "))
+    .toLowerCase().includes(f);
+}
+function fmtDur(ms) { const s = Math.round(ms/1000); return s < 60 ? s + "s" : Math.floor(s/60) + "m" + String(s%60).padStart(2,"0"); }
+function resPaint(e) {
+  const el = e.el;
+  if (e.sep) { el.className = "res-sep"; el.textContent = e.text; return; }
+  el.className = "rc " + e.status;
+  el.style.display = resMatches(e) ? "" : "none";
+  const t0 = new Date(e.started).toLocaleTimeString();
+  const dur = e.ended ? fmtDur(e.ended - e.started) : (e.status === "waiting" ? "waiting" : "running");
+  const pills = [];
+  if (e.cmds.length) pills.push(`<span class="pill">${e.cmds.length} cmd</span>`);
+  if (e.counts.ok) pills.push(`<span class="pill ok">✓ ${e.counts.ok}</span>`);
+  if (e.counts.warn) pills.push(`<span class="pill warn">! ${e.counts.warn}</span>`);
+  if (e.counts.err) pills.push(`<span class="pill err">✕ ${e.counts.err}</span>`);
+  if (e.status === "stopped") pills.push(`<span class="pill err">stopped</span>`);
+  let body = "";
+  if (e.open) {
+    const sec = [];
+    if (e.cmds.length) sec.push(`<div><div class="rc-sec">Commands</div><div class="rc-cmds">` +
+      e.cmds.map((c, i) => `<div class="rc-cmd"><code>${esc(mask(c))}</code>` +
+        `<button type="button" class="btn btn-ghost sm" data-copy="${i}">copy</button></div>`).join("") + `</div></div>`);
+    if (e.qa.length) sec.push(`<div><div class="rc-sec">Your answers</div><div class="rc-qa">` +
+      e.qa.map(q => `<span class="qa">${esc(q.q)} → <b>${esc(q.a)}</b></span>`).join("") + `</div></div>`);
+    if (e.files.length) sec.push(`<div><div class="rc-sec">Files produced</div><div class="rc-files">` +
+      e.files.map(f => `<span class="rc-file" data-file="${esc(f)}" title="${esc(f)}">📄 ${esc(f.split("/").pop())}</span>`).join("") + `</div></div>`);
+    const LIM = 300;
+    const lines = e.showAll ? e.lines : e.lines.slice(-LIM);
+    const hidden = e.lines.length - lines.length;
+    sec.push(`<div><div class="rc-sec">Output · ${e.lines.length} lines</div>` +
+      (e.lines.length ? `<div class="rc-out">` +
+        (hidden ? `<div class="rc-more" data-more="1">show ${hidden} earlier lines</div>` : "") +
+        lines.map(l => `<div class="ol ${l.c}"><span class="ic">${OL_ICON[l.c]}</span><span>${esc(mask(l.t))}</span></div>`).join("") +
+        `</div>` : `<div class="rc-empty">${e.status === "running" ? "waiting for output…" : "no output"}</div>`) + `</div>`);
+    body = `<div class="rc-body">${sec.join("")}</div>`;
+  }
+  el.innerHTML =
+    `<div class="rc-head"><span class="rc-dot"></span>` +
+    (e.menu ? `<span class="rc-menu">${esc(e.menu)} ›</span>` : "") +
+    `<span class="rc-title">${esc(e.label)}</span>` +
+    (e.key ? `<span class="rc-key">${esc(e.key)}</span>` : "") +
+    `<span class="rc-pills">${pills.join("")}</span>` +
+    `<span class="rc-time">${t0} · ${dur}</span><span class="chev">${e.open ? "▾" : "▸"}</span></div>` + body;
+  el.querySelector(".rc-head").onclick = () => { e.open = !e.open; e.userToggled = true; resPaint(e); };
+  el.querySelectorAll("[data-copy]").forEach(b => b.onclick = ev => {
+    ev.stopPropagation(); navigator.clipboard?.writeText(e.cmds[+b.dataset.copy]);
+    b.textContent = "copied"; setTimeout(() => b.textContent = "copy", 1200);
+  });
+  el.querySelectorAll("[data-file]").forEach(b => b.onclick = () => openLootFile(b.dataset.file));
+  const more = el.querySelector("[data-more]"); if (more) more.onclick = () => { e.showAll = true; resPaint(e); };
+}
+function resCountUpdate() {
+  const entries = RES.filter(e => !e.sep);
+  const shown = entries.filter(resMatches).length;
+  qs("#resCount").textContent = entries.length === shown ? `${entries.length} results` : `${shown} of ${entries.length} results`;
+  qs("#resEmpty").style.display = entries.length ? "none" : "";
+}
+async function openLootFile(rel) {
+  switchTab("loot");
+  await loadLoot(rel.split("/").slice(0, -1).join("/"));
+  previewFile(rel);
+}
+function resExport() {
+  const L = ["# linWinPwn results", "", `Exported ${new Date().toLocaleString()}`, ""];
+  RES.forEach(e => {
+    if (e.sep) { L.push(`---`, ``, `_${mask(e.text)}_`, ``); return; }
+    L.push(`## ${e.menu ? e.menu + " › " : ""}${e.label} (${e.status})`, "");
+    L.push(`Started ${new Date(e.started).toLocaleTimeString()}` + (e.ended ? `, took ${fmtDur(e.ended - e.started)}` : ""), "");
+    if (e.cmds.length) L.push("```bash", ...e.cmds.map(mask), "```", "");
+    if (e.qa.length) L.push(...e.qa.map(q => `- ${q.q} → \`${q.a}\``), "");
+    if (e.files.length) L.push("Files:", ...e.files.map(f => `- \`${f}\``), "");
+    if (e.lines.length) L.push("```", ...e.lines.map(l => mask(l.t)), "```", "");
+  });
+  const blob = new Blob([L.join("\n")], {type: "text/markdown"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `linwinpwn-results-${new Date().toISOString().slice(0,16).replace(/[:T]/g,"-")}.md`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+/* ---- view switch ---- */
+function setView(v) {
+  qsa("#viewSeg button").forEach(b => b.classList.toggle("active", b.dataset.view === v));
+  qs("#termLwp").classList.toggle("hidden", v !== "terminal");
+  qs("#resultsView").classList.toggle("hidden", v !== "results");
+  qs("#typeableWrap").classList.toggle("hidden", v !== "terminal");
+  qs("#lwpClear").classList.toggle("hidden", v !== "terminal");
+  try { localStorage.setItem("lwp.view", v); } catch (e) {}
+  if (v === "terminal") setTimeout(() => lwpTerm.refit(), 20); else resFlush();
+}
+function wireResults() {
+  qsa("#viewSeg button").forEach(b => b.onclick = () => setView(b.dataset.view));
+  let saved = "results"; try { saved = localStorage.getItem("lwp.view") || "results"; } catch (e) {}
+  setView(saved);
+  qs("#resFilter").oninput = ev => { RES_FILTER = ev.target.value.trim(); RES.forEach(e => !e.sep && e.el && (e.el.style.display = resMatches(e) ? "" : "none")); resCountUpdate(); };
+  qsa("#resStatus button").forEach(b => b.onclick = () => {
+    qsa("#resStatus button").forEach(x => x.classList.toggle("active", x === b));
+    RES_STATUS = b.dataset.st; RES_FILTER = qs("#resFilter").value.trim();
+    RES.forEach(e => !e.sep && e.el && (e.el.style.display = resMatches(e) ? "" : "none")); resCountUpdate();
+  });
+  qs("#resExpand").onclick = () => {
+    const ents = RES.filter(e => !e.sep);
+    const open = !ents.every(e => e.open);          // expand unless everything is open
+    RES.forEach(e => { if (!e.sep) { e.open = open; e.userToggled = true; resMark(e); } });
+    qs("#resExpand").textContent = open ? "collapse all" : "expand all";
+  };
+  qs("#resClear").onclick = () => { RES = []; CUR_ENTRY = null; resRenderAll(); resSave(); };
+  qs("#resExport").onclick = resExport;
+}
 
 /* ======================= history ======================= */
 const HISTORY = [];
@@ -531,7 +834,7 @@ function readConfig() {
     ldaps:ck("c_ldaps"), ldap_sign:ck("c_ldap_sign"), ldap_bind:ck("c_ldap_bind"),
     force_kerb:ck("c_force_kerb"), use_ip:ck("c_use_ip"), dns_tcp:ck("c_dns_tcp"),
     auto_config:ck("c_auto_config"), verbose:ck("c_verbose"), no_exec:ck("c_no_exec"),
-    offline:ck("c_offline"), auto:ck("c_auto"),
+    offline:ck("c_offline"), auto:qs("#modeSeg button.active")?.dataset.mode === "auto",
   };
   if (activeAuth==="password") cfg.password=v("f_password");
   if (activeAuth==="hash")     cfg.hash=v("f_hash");
@@ -541,24 +844,54 @@ function readConfig() {
   return cfg;
 }
 
+const FORM_SECRETS = new Set(["f_password","f_hash","f_aeskey","f_certpass"]);
+function saveForm() {
+  try {
+    const d = {mode: qs("#modeSeg button.active")?.dataset.mode,
+               auth: qs("#authTabs button.active")?.dataset.auth, f: {}, c: {}};
+    qsa("#cfgBar input").forEach(i => {
+      if (!i.id || FORM_SECRETS.has(i.id)) return;
+      if (i.type === "checkbox") d.c[i.id] = i.checked; else d.f[i.id] = i.value;
+    });
+    localStorage.setItem("lwp.form", JSON.stringify(d));
+  } catch (e) {}
+}
+function loadForm() {
+  try {
+    const d = JSON.parse(localStorage.getItem("lwp.form") || "null"); if (!d) return;
+    Object.entries(d.f || {}).forEach(([k, v]) => { const i = qs("#" + k); if (i) i.value = v; });
+    Object.entries(d.c || {}).forEach(([k, v]) => { const i = qs("#" + k); if (i) i.checked = v; });
+    if (d.mode) qsa("#modeSeg button").forEach(b => b.classList.toggle("active", b.dataset.mode === d.mode));
+    if (d.auth) qs(`#authTabs button[data-auth="${d.auth}"]`)?.click();
+  } catch (e) {}
+}
+
 async function startSession(cfgOverride) {
   const err = qs("#cfgError"); err.classList.add("hidden");
   const cfg = cfgOverride || readConfig();
   const r = await api("/api/session/start",{method:"POST",body:JSON.stringify(cfg)});
   const j = await r.json().catch(()=>({}));
   if (!j.ok) { err.textContent = j.error||("HTTP "+r.status); err.classList.remove("hidden");
-    qs("#cfgBody").parentElement.classList.remove("collapsed"); return; }
+    setTimeout(() => err.classList.add("hidden"), 6000); return; }
   LAST_CFG = cfg;
   afterStart(j);
 }
 function afterStart(j) {
+  RES_RESTORED = false;
+  api("/api/session/status").then(r=>r.json()).then(st => { SESSION_ID = st.id; resSave(); }).catch(()=>{});
   SESSION_RUNNING = true; CUR_MENU = null; PLAIN = ""; LINE_ACC = ""; PROMPT_SIG = null;
   hidePanel(); RUN_STATE = "off"; setRunState("running");
   setTopStatus(true);
   lwpTerm.term.clear();
   lwpTerm.reconnect();
   setTimeout(()=>note(`$ ${j.cmdline}`), 300);
-  qs("#cfgBody").parentElement.classList.add("collapsed");
+  qs("#advPanel").open = false;
+  qs("#cfgBar").classList.add("running");
+  if (CUR_ENTRY) resClose("done");
+  IN_MENU = false; AUTO_SECTION = ""; PENDING = null;
+  resSep(`session started ${new Date().toLocaleTimeString()} · ${j.cmdline.replace(/^\/bin\/bash \S+\s*/, "linWinPwn.sh ")}`);
+  const auto = (LAST_CFG && LAST_CFG.auto) || /--auto\b/.test(j.cmdline);
+  if (auto) { qs("#railDesc").textContent = "Auto mode: linWinPwn runs every default enumeration by itself. Buttons are off; follow the Results."; setView("results"); }
 }
 
 async function stopSession() {
@@ -567,6 +900,8 @@ async function stopSession() {
 }
 function sessionEnded() {
   SESSION_RUNNING=false; CUR_MENU=null;
+  if (CUR_ENTRY) resClose("done");
+  qs("#cfgBar").classList.remove("running");
   hidePanel(); setRunState("off"); setTopStatus(false);
 }
 function setTopStatus(on){
@@ -589,6 +924,7 @@ async function stopTask() {
     note(RUN_STATE==="input" ? "nothing is running (answer or leave the form)" : "nothing is running");
     return;
   }
+  if (CUR_ENTRY) resClose("stopped");
   const names = [...new Set(j.stopped.map(p=>p.cmd.split(" ")[0].split("/").pop()).filter(Boolean))];
   note(`^C stopped: ${names.slice(0,6).join(", ")}`);
 }
@@ -675,7 +1011,21 @@ function wire(){
   qs("#ppReveal").onclick = () => { const i=qs("#ppInput"); i.type = i.type==="password"?"text":"password"; i.focus(); };
 
   qsa("#mainTabs button").forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
-  qsa(".panel-head[data-toggle]").forEach(h=>h.onclick=()=>h.parentElement.classList.toggle("collapsed"));
+  qsa("#modeSeg button").forEach(b => b.onclick = () =>
+    qsa("#modeSeg button").forEach(x => x.classList.toggle("active", x === b)));
+  const adv = qs("#advPanel");
+  const advCount = () => {
+    const n = qsa(".adv-pop input").filter(i => i.type === "checkbox" ? i.checked : i.value.trim()).length;
+    const c = qs("#advCount"); c.textContent = n; c.classList.toggle("hidden", !n);
+  };
+  qsa(".adv-pop input").forEach(i => { i.addEventListener("input", advCount); i.addEventListener("change", advCount); });
+  document.addEventListener("click", ev => { if (adv.open && !adv.contains(ev.target)) adv.open = false; });
+  document.addEventListener("keydown", ev => { if (ev.key === "Escape") adv.open = false; });
+  qsa("#cfgBar input:not([type=checkbox])").forEach(i => i.addEventListener("keydown", ev => {
+    if (ev.key === "Enter") { ev.preventDefault(); startSession(); } }));
+  wireResults();
+  qsa("#cfgBar input").forEach(i => i.addEventListener("change", saveForm));
+  qsa("#modeSeg button, #authTabs button").forEach(b => b.addEventListener("click", () => setTimeout(saveForm)));
   qsa("#authTabs button").forEach(b=>b.onclick=()=>{
     qsa("#authTabs button").forEach(x=>x.classList.remove("active"));
     b.classList.add("active");
@@ -685,13 +1035,15 @@ function wire(){
   qs("#lootRefresh").onclick=()=>loadLoot(lootPath);
   qs("#histCopyAll").onclick=()=>navigator.clipboard?.writeText(HISTORY.map(h=>h.cmd).join("\n"));
   qs("#histClear").onclick=()=>{ HISTORY.length=0; qs("#histList").innerHTML=""; qs("#histCount").textContent="0"; };
-  qs("#f_target").addEventListener("keydown",e=>{ if(e.key==="Enter") startSession(); });
   wireBh();
 }
 
 async function init(){
   wire();
+  loadForm();
+  qsa(".adv-pop input")[0]?.dispatchEvent(new Event("input"));   // refresh advanced badge
   const cfg = await api("/api/config").then(r=>r.json()).catch(()=>({}));
+  OUTPUT_DIR = (cfg && cfg.default_output) || "";
   if (cfg && cfg.script_present===false)
     qs("#brandMeta").textContent = "⚠ linWinPwn.sh not found next to web_ui/";
   MENUS = await api("/api/menus").then(r=>r.json()).then(d=>d.menus).catch(()=>[]);
@@ -700,8 +1052,8 @@ async function init(){
 
   // reattach to a session already running (page reload): scrollback replays the state
   const s = await api("/api/session/status").then(r=>r.json()).catch(()=>null);
-  if (s && s.running) { SESSION_RUNNING=true; setTopStatus(true); setRunState("running");
-    qs("#cfgBody").parentElement.classList.add("collapsed"); lwpTerm.connect(); }
+  if (s && s.running) { SESSION_ID = s.id; resRestore(s.id); SESSION_RUNNING=true; setTopStatus(true); setRunState("running");
+    qs("#cfgBar").classList.add("running"); lwpTerm.connect(); }
 
   setInterval(async()=>{
     const s = await api("/api/session/status").then(r=>r.json()).catch(()=>null);

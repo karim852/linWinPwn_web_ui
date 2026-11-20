@@ -6,26 +6,35 @@ Everything is done from the web: you pick menus and options with buttons, and ev
 
 The dashboard does not rewrite any linWinPwn logic. The backend starts the real `linWinPwn.sh` inside a pseudo terminal, the buttons send the same keys you would type, and the browser reads the output to know what the script is waiting for.
 
+![Results view](docs/screenshots/03_results_batch_card.png)
+
+More screenshots in [docs/screenshots](docs/screenshots): [session bar](docs/screenshots/01_config_bar_advanced.png), [question form](docs/screenshots/02_results_question_waiting.png), [terminal view](docs/screenshots/04_terminal_view.png), [Auto mode](docs/screenshots/05_auto_mode_results.png).
+
 ## Features
 
-- **Session form**: target DC, domain, user, and the 5 auth methods (password, NTLM hash, Kerberos ticket, AES key, PFX cert), plus every CLI flag (`--ldaps`, `--ldap-sign`, `--ldap-bind`, `--force-kerb`, `--use-ip`, `--dns-tcp`, `--auto-config`, `--verbose`, `--no-exec`, `--offline`, `--auto`, `-T`, `-I`, `-a`, wordlists, output dir...).
-- **Module sidebar**: all menus with a filter box. Each action has badges: `noisy`, `batch` (the `A` option of each menu), `prompts` (asks questions) and `console` (opens an interactive tool).
+- **Session bar at the top, always visible**: target DC, domain, user, the 5 auth methods (password, NTLM hash, Kerberos ticket, AES key, PFX cert), the **mode** (Interactive or Auto `--auto`) and Start/Restart. Every other CLI flag (`-T`, `-I`, `-a`, DNS IP, LDAP port, wordlists, output dir, `--ldaps`, `--ldap-sign`, `--ldap-bind`, `--force-kerb`, `--use-ip`, `--dns-tcp`, `--auto-config`, `--verbose`, `--no-exec`, `--offline`) sits in the **⚙ Advanced** dropdown, with a badge counting what is set. Press Enter in any field to start. The form is remembered in the browser between reloads, passwords and keys excepted.
+- **Two modes**:
+  - *Interactive*: you drive linWinPwn from the module buttons.
+  - *Auto (`--auto`)*: linWinPwn runs every default enumeration by itself; you follow it in the Results view.
+- **Module sidebar**: all menus with a filter box. Each action has badges: `noisy`, `batch` (the `A` option of each menu), `form` (asks questions) and `console` (opens an interactive tool).
+- **Two views of the output, your choice** (switch at the top right of the linWinPwn tab, remembered):
+  - **▤ Results**: no terminal. Each action becomes a card: menu and action name, status (running, waiting for your answer, done, stopped), the commands it ran (with copy buttons), the output sorted into success / warning / error / info lines, the answers you gave in the forms, and the files it produced (click to open them in Output / loot). Menu listings are filtered out. In Auto mode the cards are named after what the script announces (`DC List Enumeration`, `Get MachineAccountQuota`...) and grouped by its sections. Search, status filter (running / done / issues), expand/collapse all, export to Markdown. Passwords and keys from your session are masked in cards and exports. Cards survive a page reload.
+  - **⌨ Terminal**: the raw linWinPwn output (xterm.js, colours kept), with optional typing.
 - **Web forms for every question**: the UI reads the output and shows the right form under it:
-  - text question, with the default value shown and a "Use default" button (`press Enter to choose default value ...`)
+  - text question, with the default value shown and a "Use default" button
   - password / hash / key fields are masked (with a show button)
   - yes / no (`y/N`) and two-choice questions (`'RC4' or 'AES'`) become buttons
   - values listed above a question (for example your IPs) become clickable suggestions
   - numbered lists (Modify target(s), LDAPPER options...) become buttons, plus a free text field
   - `press ENTER to continue` becomes a "Continue" button
   - tool consoles (evil-winrm, smbclient, mssqlclient, LDAP console...) get a command field
-- **Run state**: `ready` (at a menu, buttons active), `running…`, `waiting for your answer`. The UI also reads the menu headers (`[AD Enum menu]`...) so it always knows which menu the script is in.
+- **Run state**: `ready` (at a menu, buttons active), `running…`, `waiting for your answer` (pulses; the tab pulses too if you look elsewhere). The UI reads the menu headers (`[AD Enum menu]`...) so it always knows which menu the script is in.
 - **■ Stop**: works like Ctrl+C on the running command only. You stay in the same menu and the session keeps running. If the tool ignores the signal it is forced after 3 to 5 seconds. (A real Ctrl+C would kill linWinPwn itself, since the script has no handler for it.)
 - **⟲ reset**: restarts the whole session with the same config, also after a page reload.
 - **Offline preview with your creds**: tick `Offline` + `No-exec` and fill the credentials: the script prints the exact commands it would run with them, without touching any target.
 - **Command history**: every command linWinPwn runs (already masked by the script), with copy buttons.
-- **linWinPwn terminal**: live output of the script (xterm.js, colors kept).
 - **Embedded shell**: a separate bash in the repo folder, for manual commands (netexec, impacket, certipy...). It keeps running when you switch tabs.
-- **Output / loot**: read-only browser of the output folder, with preview and download.
+- **Output / loot**: read-only browser of the output folder, with preview and download (binary files offered as download).
 - **BloodHound tab**: load a collection (the zip linWinPwn produces, a folder of `*_users.json`, or a single json) and get an inventory of the directory plus the AD hygiene problems worth fixing, each with the objects concerned and a remediation note. Export the whole thing as Markdown for a report. See the section below for what it does and does not do.
 - Secrets (`-p`, `-H`, `-A`, `--cert-pass`) are hidden in the command line shown back in the UI.
 
@@ -60,6 +69,7 @@ docker run --rm -it --net=host \
 
 Action buttons are active only when the script is back at a menu (`ready`). The UI knows the current menu from the script's own headers:
 
+- Each click also opens a card in the Results view, closed as `done` once the script is back at a menu.
 - Action in the menu you are already in: it sends only the action key (e.g. `1`).
 - Action in another menu: it sends `back`, then the menu number, then the action key.
 - **⌂ main menu** goes back to the main menu.

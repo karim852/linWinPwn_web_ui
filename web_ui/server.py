@@ -105,6 +105,7 @@ class PtySession:
         self.pid = pid
         self.fd = fd
         self.alive = True
+        self.started = time.time()
         flags = fcntl.fcntl(fd, fcntl.F_GETFL)
         fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         self.set_winsize(40, 120)
@@ -453,7 +454,9 @@ def api_stop_task():
 @app.route("/api/session/status")
 def api_session_status():
     sess = get_session("linwinpwn")
-    return jsonify({"running": bool(sess and sess.is_alive())})
+    running = bool(sess and sess.is_alive())
+    return jsonify({"running": running,
+                    "id": (f"{sess.pid}-{int(sess.started)}" if sess and getattr(sess, "started", None) else None)})
 
 
 @app.route("/api/action", methods=["POST"])

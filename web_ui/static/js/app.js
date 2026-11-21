@@ -52,13 +52,16 @@ function makeTerm(elId, wsPath, opts={}) {
   let ws=null, retry=null, connected=false, firstMsg=true;
   function connect() {
     const proto = location.protocol==="https:"?"wss":"ws";
-    ws = new WebSocket(`${proto}://${location.host}${wsPath}?token=${encodeURIComponent(TOKEN)}`);
-    ws.onopen = () => { connected=true; firstMsg=true; sendResize(); opts.onopen && opts.onopen(); };
-    ws.onmessage = ev => { const f = firstMsg; firstMsg = false;
+    const sock = new WebSocket(`${proto}://${location.host}${wsPath}?token=${encodeURIComponent(TOKEN)}`);
+    ws = sock;
+    // every handler checks it still belongs to the current socket: the close event
+    // of a replaced socket can arrive after the new one opened
+    sock.onopen = () => { if (sock !== ws) return; connected=true; firstMsg=true; sendResize(); opts.onopen && opts.onopen(); };
+    sock.onmessage = ev => { if (sock !== ws) return; const f = firstMsg; firstMsg = false;
       term.write(ev.data); opts.onoutput && opts.onoutput(ev.data, f); };
-    ws.onclose = () => { connected=false; opts.onclose && opts.onclose();
+    sock.onclose = () => { if (sock !== ws) return; connected=false; opts.onclose && opts.onclose();
       if(opts.autoReconnect){ clearTimeout(retry); retry=setTimeout(connect,1500);} };
-    ws.onerror = () => {};
+    sock.onerror = () => {};
   }
   function sendResize(){ if(ws&&connected) ws.send("\x00json:"+JSON.stringify(
     {type:"resize",rows:term.rows,cols:term.cols})); }
@@ -67,7 +70,7 @@ function makeTerm(elId, wsPath, opts={}) {
   window.addEventListener("resize", ()=>{try{fit.fit();sendResize();}catch(e){}});
 
   return { term, connect, send,
-           reconnect(){ try{ws&&ws.close();}catch(e){} connect(); },
+           reconnect(){ const old = ws; connected = false; connect(); try{ old && old.close(); }catch(e){} },
            refit(){ try{fit.fit();sendResize();}catch(e){} } };
 }
 
@@ -275,7 +278,7 @@ function answer(text) {
   } else if (LAST_SPEC && CUR_ENTRY) {
     CUR_ENTRY.lines.push({t: "› " + text, c: "info"});
   }
-  if (CUR_ENTRY) { CUR_ENTRY.status = "running"; resMark(CUR_ENTRY); }
+  if (CUR_ENTRY && CUR_ENTRY.status === "waiting") { CUR_ENTRY.status = "running"; resMark(CUR_ENTRY); }
   lwpTerm.send(text + "\r");
   hidePanel();
   setRunState("running");
@@ -422,12 +425,16 @@ function resSave() {
   } catch (e) {}
 }
 function resRestore(id) {
+  /* Always bring back the saved cards (also after the session ended).
+     Skip re-reading the replayed output only when it is the same session. */
   try {
     const d = JSON.parse(sessionStorage.getItem("lwp.res") || "null");
-    if (!d || d.id !== id) return false;
+    if (!d) return false;
     RES = d.res; RES_SEQ = d.seq || RES.length;
-    CUR_ENTRY = RES.find(e => e.id === d.cur) || null;
-    resRenderAll(); RES_RESTORED = true; return true;
+    const same = !!id && d.id === id;
+    CUR_ENTRY = same ? (RES.find(e => e.id === d.cur) || null) : null;
+    if (!same) RES.forEach(e => { if (e.status === "running" || e.status === "waiting") { e.status = "done"; e.ended = e.ended || Date.now(); } });
+    resRenderAll(); RES_RESTORED = same; SESSION_ID = SESSION_ID || d.id; return true;
   } catch (e) { return false; }
 }
 const resDirty = new Set(); let resTimer = null;
@@ -733,73 +740,216 @@ async function bhUpload(file) {
   bhRender(j.report);
 }
 
+let BH = null;                     // current report
+const EX = {type: "User", q: "", sort: "name", desc: false, page: 0, size: 50, filter: ""};
+const DR_HIST = [];
+
+function bhTab(t) {
+  qsa("#bhTabs button").forEach(b => b.classList.toggle("active", b.dataset.bt === t));
+  qsa("#bhReport .bh-body").forEach(p => p.classList.toggle("hidden", p.dataset.bp !== t));
+  if (t === "explorer") exLoad();
+}
+
+function bhBars(rows, nameKey, max, warnFn, clickFn) {
+  const top = Math.max(1, ...rows.map(r => r.count));
+  return rows.slice(0, max).map((r, i) => {
+    const w = Math.round(100 * r.count / top);
+    const warn = warnFn && warnFn(r) ? " warn" : "";
+    return `<div class="bar-row"><span class="nm${clickFn ? " click" : ""}" data-i="${i}" title="${esc(r[nameKey])}">${esc(r[nameKey])}</span>` +
+           `<span class="bar-track"><span class="bar-fill${warn}" style="width:${r.count ? Math.max(w, 2) : 0}%"></span></span>` +
+           `<span class="n">${r.count}</span></div>`;
+  }).join("") || `<div class="dim">none</div>`;
+}
+
 function bhRender(rep) {
+  BH = rep;
   qs("#bhSrc").classList.add("hidden");
   qs("#bhReport").classList.remove("hidden");
-  const st = rep.stats;
+  qs("#bhDrawer").classList.add("hidden"); qs("#bhReport").classList.remove("dr-open"); DR_HIST.length = 0;
+  const st = rep.stats, ov = rep.overview || {};
   qs("#bhLabel").innerHTML = `<b>${esc(st.domains.join(", ") || rep.label)}</b>` +
-    (st.collected ? ` · collected ${esc(String(st.collected).slice(0,10))}` : "") +
-    ` · ${esc(rep.label)}`;
-  qs("#bhSevChips").innerHTML = ["high","medium","low","info"]
-    .filter(k => rep.severity[k])
-    .map(k => `<span class="sev-chip sev-${k}">${rep.severity[k]} ${SEV_LABEL[k]}</span>`).join("");
+    (st.collected ? ` · collected ${esc(String(st.collected).slice(0,10))}` : "") + ` · ${esc(rep.label)}`;
+  qs("#bhSevChips").innerHTML = ["high","medium","low","info"].filter(k => rep.severity[k])
+    .map(k => `<span class="sev-chip sev-${k}">${rep.severity[k]} ${k}</span>`).join("");
+  qs("#bhCount").textContent = rep.checks.length;
 
-  const stat = (v, l, s="") => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div>` +
+  /* overview */
+  const stat = (v, l, s="", go="") => `<div class="stat${go ? " click" : ""}" ${go}><div class="v">${v}</div><div class="l">${l}</div>` +
     (s ? `<div class="s">${s}</div>` : "") + `</div>`;
+  const tc = rep.type_counts || {};
   qs("#bhStats").innerHTML =
-    stat(st.users_enabled, "enabled users", `${st.users} total`) +
-    stat(st.computers_enabled, "enabled computers", `${st.computers} total`) +
-    stat(st.domain_admins, "domain admins") +
+    stat(st.users_enabled, "enabled users", `${st.users} total`, `data-ex="User"`) +
+    stat(st.computers_enabled, "enabled computers", `${ov.servers ?? "?"} servers · ${ov.workstations ?? "?"} workstations`, `data-ex="Computer"`) +
+    stat(st.domain_admins, "domain admins", `${ov.privileged_users ?? "?"} privileged accounts`, `data-ex="User" data-f="privileged"`) +
     stat(st.dcs, "domain controllers") +
-    stat(st.groups, "groups") +
-    stat(st.ous, "OUs") +
-    stat(st.gpos, "GPOs") +
-    stat(rep.seconds < 1 ? Math.max(1, Math.round(rep.seconds*1000)) + "ms" : rep.seconds + "s",
-         "parse time", `${st.objects} objects`);
-
-  const bars = (rows, nameKey, max, warnFn) => {
-    const top = Math.max(1, ...rows.map(r=>r.count));
-    return rows.slice(0,max).map(r => {
-      const w = Math.round(100 * r.count / top);
-      const warn = warnFn && warnFn(r) ? " warn" : "";
-      return `<div class="bar-row"><span class="nm" title="${esc(r[nameKey])}">${esc(r[nameKey])}</span>` +
-             `<span class="bar-track"><span class="bar-fill${warn}" style="width:${w}%"></span></span>` +
-             `<span class="n">${r.count}</span></div>`;
-    }).join("") || `<div class="dim">none</div>`;
-  };
-  qs("#bhPriv").innerHTML = bars(rep.privileged_groups.filter(r=>r.count>0), "group", 10,
+    stat(st.groups, "groups", "", `data-ex="Group"`) +
+    stat(st.ous, "OUs", "", `data-ex="OU"`) +
+    stat(st.gpos, "GPOs", "", `data-ex="GPO"`) +
+    stat((tc.CertTemplate || 0) + " / " + (tc.EnterpriseCA || 0), "templates / CAs", "", `data-ex="CertTemplate"`) +
+    stat(rep.seconds < 1 ? Math.max(1, Math.round(rep.seconds*1000)) + "ms" : rep.seconds + "s", "parse time", `${st.objects} objects`);
+  qsa("#bhStats [data-ex]").forEach(el => el.onclick = () => {
+    EX.type = el.dataset.ex; EX.filter = el.dataset.f || ""; EX.page = 0; EX.q = ""; qs("#exSearch").value = "";
+    bhTab("explorer");
+  });
+  const ch = rep.charts || {};
+  const oldBucket = r => /1 year|never|180/.test(r.label);
+  qs("#chUserLogon").innerHTML = bhBars(ch.user_logon || [], "label", 6, oldBucket);
+  qs("#chUserPwd").innerHTML = bhBars(ch.user_pwd || [], "label", 6, r => /1 year/.test(r.label));
+  qs("#chCompLogon").innerHTML = bhBars(ch.computer_logon || [], "label", 6, oldBucket);
+  qs("#bhPriv").innerHTML = bhBars(rep.privileged_groups.filter(r => r.count > 0), "group", 12,
     r => r.group === "Domain Admins" && r.count > 10);
   const oldOs = /windows (xp|vista|7|8|2000|server 2003|server 2008|server 2012)|2003|2008|2012/i;
-  qs("#bhOs").innerHTML = bars(rep.os_breakdown, "os", 10, r => oldOs.test(r.os));
+  qs("#bhOs").innerHTML = bhBars(rep.os_breakdown, "os", 12, r => oldOs.test(r.os));
+  qs("#bhDcs").innerHTML = (ov.dcs || []).map(d =>
+    `<div class="kv click" data-id="${esc(d.id)}"><span class="k">${esc(d.name)}</span><span class="v">${esc(d.os || "?")}` +
+    (d.last_logon != null ? ` · seen ${d.last_logon}d ago` : "") + `</span></div>`).join("") || `<div class="dim">none found</div>`;
+  qs("#bhDoms").innerHTML = (ov.domains || []).map(d =>
+    `<div class="kv"><span class="k">${esc(d.name)}</span><span class="v">level ${esc(d.functional_level ?? "?")}` +
+    (d.created != null ? ` · created ${Math.round(d.created/365)}y ago` : "") + `</span></div>`).join("") +
+    (ov.trusts || []).map(t => `<div class="kv"><span class="k">→ ${esc(t.target)}</span><span class="v">${esc(t.direction)} · ${esc(t.type)} · SID filtering ${esc(t.sidfiltering)}</span></div>`).join("");
+  qsa("#bhDcs [data-id]").forEach(el => el.onclick = () => drOpen(el.dataset.id));
 
-  qs("#bhCount").textContent = `· ${rep.checks.length} checks`;
+  /* findings */
+  bhRenderChecks();
+
+  /* explorer type buttons */
+  const types = [["User","Users"],["Computer","Computers"],["Group","Groups"],["OU","OUs"],["GPO","GPOs"],
+                 ["CertTemplate","Templates"],["EnterpriseCA","CAs"],["Domain","Domains"]].filter(([t]) => (tc[t] || 0) > 0);
+  qs("#exType").innerHTML = types.map(([t, l]) =>
+    `<button type="button" data-t="${t}" class="${t === EX.type ? "active" : ""}">${l} <span class="dim">${tc[t]}</span></button>`).join("");
+  qsa("#exType button").forEach(b => b.onclick = () => { EX.type = b.dataset.t; EX.page = 0; EX.sort = "name"; EX.desc = false; exLoad(); });
+  bhTab("overview");
+  qs(".bh").scrollTop = 0;
+}
+
+let BH_SEV = "all", BH_Q = "";
+function bhRenderChecks() {
   const box = qs("#bhChecks"); box.innerHTML = "";
-  rep.checks.forEach((c, i) => {
+  const q = BH_Q.toLowerCase();
+  const list = BH.checks.filter(c => (BH_SEV === "all" || c.severity === BH_SEV) &&
+    (!q || (c.title + " " + c.why + " " + c.items.map(i => (i.name || "") + " " + (i.detail || "")).join(" ")).toLowerCase().includes(q)));
+  if (!list.length) box.innerHTML = `<div class="ex-empty">no finding matches</div>`;
+  list.forEach((c, i) => {
     const el = document.createElement("div");
-    el.className = "chk";
+    el.className = "chk"; el.dataset.cid = c.id;
     const pct = c.pct !== null && c.pct !== undefined ? ` (${c.pct}%)` : "";
     el.innerHTML =
-      `<div class="chk-head"><span class="sev-chip sev-${c.severity}">${SEV_LABEL[c.severity]}</span>` +
-      `<span class="t">${esc(c.title)}</span>` +
-      `<span class="c">${c.count}${pct}</span><span class="chev">▸</span></div>` +
-      `<div class="chk-body hidden">` +
-        `<p>${esc(c.why)}</p>` +
-        `<p class="fix"><b>Fix.</b> ${esc(c.fix)}</p>` +
-        (c.items.length ? `<ul class="chk-items">` + c.items.map(it =>
-            `<li><span class="nm">${esc(it.name||"")}</span>` +
-            (it.detail ? `<span class="dt">${esc(it.detail)}</span>` : "") + `</li>`).join("") +
-          `</ul>` + (c.truncated ? `<div class="chk-more">showing ${c.items.length} of ${c.count} — full list in the .md export</div>` : "")
-         : "") +
+      `<div class="chk-head"><span class="sev-chip sev-${c.severity}">${c.severity}</span>` +
+      `<span class="t">${esc(c.title)}</span><span class="c">${c.count}${pct}</span><span class="chev">▸</span></div>` +
+      `<div class="chk-body hidden"><p>${esc(c.why)}</p><p class="fix"><b>Fix.</b> ${esc(c.fix)}</p>` +
+      (c.items.length ? `<ul class="chk-items">` + c.items.map(it =>
+          `<li class="${it.id ? "click" : ""}" ${it.id ? `data-id="${esc(it.id)}"` : ""}><span class="nm">${esc(it.name || "")}</span>` +
+          (it.detail ? `<span class="dt">${esc(it.detail)}</span>` : "") + `</li>`).join("") + `</ul>` +
+          (c.truncated ? `<div class="chk-more">showing ${c.items.length} of ${c.count} — full list in the .md export</div>` : "") : "") +
       `</div>`;
     const head = el.querySelector(".chk-head"), body = el.querySelector(".chk-body");
-    head.onclick = () => {
-      body.classList.toggle("hidden");
-      el.querySelector(".chev").textContent = body.classList.contains("hidden") ? "▸" : "▾";
-    };
-    if (i < 3) head.click();          // open the first few
+    head.onclick = () => { body.classList.toggle("hidden");
+      el.querySelector(".chev").textContent = body.classList.contains("hidden") ? "▸" : "▾"; };
+    el.querySelectorAll("li[data-id]").forEach(li => li.onclick = () => drOpen(li.dataset.id));
+    if (i < 3 && !q && BH_SEV === "all") head.click();
+    if (q) head.click();
     box.appendChild(el);
   });
-  qs(".bh").scrollTop = 0;
+}
+
+/* ---- explorer ---- */
+const EX_LABEL = {name:"Name", enabled:"Enabled", privileged:"Privileged", last_logon:"Last logon", pwd_age:"Password age",
+  flags:"Flags", ou:"OU", description:"Description", os:"Operating system", role:"Role", members:"Members",
+  users_total:"Users (nested)", objects:"Objects", gpos:"GPOs", linked_to:"Linked to", created:"Created", ekus:"EKUs",
+  functional_level:"Functional level"};
+const BAD_FLAGS = new Set(["no-preauth","pwd-not-required","unconstrained","requester-supplies-subject","SAN-from-request"]);
+const WARN_FLAGS = new Set(["SPN","pwd-never-expires","adminCount","constrained"]);
+const OK_FLAGS = new Set(["LAPS","sensitive","manager-approval"]);
+
+function exCell(col, v) {
+  if (col === "name") return `<td class="nm" title="${esc(v)}">${esc(v)}</td>`;
+  if (typeof v === "boolean") return `<td class="${v ? "yes" : "no"}">${v ? "yes" : "no"}</td>`;
+  if (col === "last_logon" || col === "pwd_age" || col === "created") {
+    if (v === null || v === undefined) return `<td class="vold">never</td>`;
+    const cls = col === "created" ? "" : (v > 365 ? "vold" : v > 90 ? "old" : "");
+    return `<td class="${cls}">${v} d</td>`;
+  }
+  if (col === "flags") return `<td>${(v || []).map(f => `<span class="tag ${BAD_FLAGS.has(f) ? "bad" : WARN_FLAGS.has(f) ? "warn" : OK_FLAGS.has(f) ? "ok" : ""}">${esc(f)}</span>`).join("")}</td>`;
+  if (col === "role") return `<td><span class="tag ${v === "DC" ? "acc" : ""}">${esc(v)}</span></td>`;
+  if (Array.isArray(v)) return `<td title="${esc(v.join(", "))}">${v.length ? esc(v.join(", ")) : `<span class="dim">—</span>`}</td>`;
+  return `<td title="${esc(v ?? "")}">${esc(v ?? "")}</td>`;
+}
+
+async function exLoad() {
+  qsa("#exType button").forEach(b => b.classList.toggle("active", b.dataset.t === EX.type));
+  qsa("#exFilter button").forEach(b => b.classList.toggle("active", b.dataset.f === EX.filter));
+  const qsx = new URLSearchParams({type: EX.type, q: EX.q, sort: EX.sort, desc: EX.desc ? "1" : "0",
+                                   page: EX.page, size: EX.size, filter: EX.filter}).toString();
+  const j = await api("/api/bh/objects?" + qsx).then(r => r.json()).catch(() => ({}));
+  const thead = qs("#exTable thead"), tbody = qs("#exTable tbody");
+  if (!j.ok) { tbody.innerHTML = `<tr><td class="ex-empty">${esc(j.error || "load failed")}</td></tr>`; return; }
+  thead.innerHTML = "<tr>" + j.cols.map(c =>
+    `<th data-c="${c}" class="${c === EX.sort ? "sorted" : ""}">${EX_LABEL[c] || c}${c === EX.sort ? (EX.desc ? " ↓" : " ↑") : ""}</th>`).join("") + "</tr>";
+  qsa("#exTable th").forEach(th => th.onclick = () => {
+    if (EX.sort === th.dataset.c) EX.desc = !EX.desc; else { EX.sort = th.dataset.c; EX.desc = ["last_logon","pwd_age","members","users_total","objects","gpos"].includes(th.dataset.c); }
+    EX.page = 0; exLoad();
+  });
+  tbody.innerHTML = j.rows.length ? j.rows.map(r =>
+    `<tr data-id="${esc(r.id)}">` + j.cols.map(c => exCell(c, r[c])).join("") + `</tr>`).join("")
+    : `<tr><td class="ex-empty" colspan="${j.cols.length}">no object matches</td></tr>`;
+  qsa("#exTable tbody tr[data-id]").forEach(tr => tr.onclick = () => {
+    qsa("#exTable tbody tr.sel").forEach(x => x.classList.remove("sel")); tr.classList.add("sel"); drOpen(tr.dataset.id); });
+  const pages = Math.max(1, Math.ceil(j.total / j.size));
+  qs("#exInfo").textContent = `${j.total} ${EX.type.toLowerCase()}${j.total === 1 ? "" : "s"}` + (EX.q || EX.filter ? " match" : "");
+  qs("#exPage").textContent = `page ${j.page + 1} / ${pages}`;
+  qs("#exPrev").disabled = j.page <= 0;
+  qs("#exNext").disabled = j.page + 1 >= pages;
+}
+
+/* ---- detail drawer ---- */
+async function drOpen(id, fromHistory) {
+  const j = await api("/api/bh/object?id=" + encodeURIComponent(id)).then(r => r.json()).catch(() => ({}));
+  if (!j.ok) return;
+  const o = j.object;
+  if (!fromHistory) { const cur = qs("#bhDrawer").dataset.id; if (cur && !qs("#bhDrawer").classList.contains("hidden")) DR_HIST.push(cur); }
+  qs("#bhDrawer").dataset.id = o.id;
+  qs("#drBack").disabled = !DR_HIST.length;
+  qs("#drType").textContent = o.type + (o.row && o.row.privileged ? " · privileged" : "");
+  qs("#drTitle").textContent = o.name;
+  const link = r => r && BH_has(r) ? `<span class="dr-link" data-id="${esc(r.id)}">${esc(r.name)}</span>` : `<span class="dr-link dim">${esc(r.name)}</span>`;
+  const sec = (t, html) => html ? `<div class="dr-sec"><h5>${t}</h5>${html}</div>` : "";
+  const row = o.row || {};
+  const keyinfo = Object.entries(row).filter(([k]) => !["id","name","type"].includes(k)).map(([k, v]) => {
+    let val = v;
+    if (typeof v === "boolean") val = v ? "yes" : "no";
+    else if (["last_logon","pwd_age","created"].includes(k)) val = v == null ? "never" : `${v} days ago`;
+    else if (Array.isArray(v)) val = v.join(", ") || "—";
+    return `<tr><td>${esc(EX_LABEL[k] || k)}</td><td>${esc(val)}</td></tr>`;
+  }).join("");
+  let html = "";
+  if (o.findings.length) html += sec("Findings", `<div>` + o.findings.map(f =>
+    `<div class="dr-find" data-cid="${esc(f.id)}"><span class="sev-chip sev-${f.severity}">${f.severity}</span><span class="t">${esc(f.title)}</span></div>`).join("") + `</div>`);
+  html += sec("Summary", `<table class="dr-props">${keyinfo}</table>`);
+  if (o.member_of.length) html += sec(`Member of (${o.member_of.length})`, `<div class="dr-chips">${o.member_of.map(link).join("")}</div>`);
+  if (o.member_of_nested.length) html += sec(`Also member through nesting (${o.member_of_nested.length})`, `<div class="dr-chips">${o.member_of_nested.map(link).join("")}</div>`);
+  if (o.members) html += sec(`Direct members (${o.members.length}) · ${o.members_total_users} users in total`,
+    `<div class="dr-chips">${o.members.slice(0, 300).map(link).join("")}${o.members.length > 300 ? `<span class="dim">… ${o.members.length - 300} more</span>` : ""}</div>`);
+  if (o.linked_to) html += sec("Linked to", o.linked_to.length ? `<div class="dr-chips">${o.linked_to.map(n => `<span class="dr-link dim">${esc(n)}</span>`).join("")}</div>` : `<span class="dim">nowhere</span>`);
+  html += sec(`All attributes (${Object.keys(o.props).length})`, `<table class="dr-props">` +
+    Object.entries(o.props).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(typeof v === "object" ? JSON.stringify(v) : v)}</td></tr>`).join("") + `</table>`);
+  qs("#drBody").innerHTML = html;
+  qsa("#drBody .dr-link[data-id]").forEach(el => el.onclick = () => drOpen(el.dataset.id));
+  qsa("#drBody .dr-find").forEach(el => el.onclick = () => bhGotoFinding(el.dataset.cid));
+  qs("#bhDrawer").classList.remove("hidden");
+  qs("#bhReport").classList.add("dr-open");
+  qs("#drBody").scrollTop = 0;
+}
+function BH_has(r) { return r && r.id && !/\(not collected\)$/.test(r.name); }
+function drClose() { qs("#bhDrawer").classList.add("hidden"); qs("#bhReport").classList.remove("dr-open"); DR_HIST.length = 0; qsa("#exTable tbody tr.sel").forEach(x => x.classList.remove("sel")); }
+function bhGotoFinding(cid) {
+  BH_SEV = "all"; BH_Q = ""; qs("#bhFindFilter").value = "";
+  qsa("#bhSevFilter button").forEach(b => b.classList.toggle("active", b.dataset.sev === "all"));
+  bhRenderChecks(); bhTab("findings");
+  const el = qs(`#bhChecks .chk[data-cid="${cid}"]`);
+  if (!el) return;
+  const body = el.querySelector(".chk-body");
+  if (body.classList.contains("hidden")) el.querySelector(".chk-head").click();
+  el.scrollIntoView({block: "start"}); el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
 }
 
 function wireBh() {
@@ -819,6 +969,31 @@ function wireBh() {
   };
   qs("#bhExport").onclick = () =>
     location.href = `/api/bh/export?token=${encodeURIComponent(TOKEN)}`;
+  qsa("#bhTabs button").forEach(b => b.onclick = () => bhTab(b.dataset.bt));
+  qsa("#bhSevFilter button").forEach(b => b.onclick = () => {
+    qsa("#bhSevFilter button").forEach(x => x.classList.toggle("active", x === b));
+    BH_SEV = b.dataset.sev; bhRenderChecks(); });
+  let ft = null;
+  qs("#bhFindFilter").oninput = e => { clearTimeout(ft); ft = setTimeout(() => { BH_Q = e.target.value.trim(); bhRenderChecks(); }, 150); };
+  qs("#bhExpandAll").onclick = () => {
+    const bodies = qsa("#bhChecks .chk-body"); const open = bodies.some(b => b.classList.contains("hidden"));
+    qsa("#bhChecks .chk").forEach(el => { const b = el.querySelector(".chk-body");
+      if (b.classList.contains("hidden") === open) el.querySelector(".chk-head").click(); });
+    qs("#bhExpandAll").textContent = open ? "collapse all" : "expand all";
+  };
+  let st = null;
+  qs("#exSearch").oninput = e => { clearTimeout(st); st = setTimeout(() => { EX.q = e.target.value.trim(); EX.page = 0; exLoad(); }, 200); };
+  qsa("#exFilter button").forEach(b => b.onclick = () => { EX.filter = b.dataset.f; EX.page = 0; exLoad(); });
+  qs("#exPrev").onclick = () => { if (EX.page > 0) { EX.page--; exLoad(); } };
+  qs("#exNext").onclick = () => { EX.page++; exLoad(); };
+  qs("#exCsv").onclick = () => {
+    const qsx = new URLSearchParams({type: EX.type, q: EX.q, sort: EX.sort, desc: EX.desc ? "1" : "0", filter: EX.filter, token: TOKEN});
+    location.href = "/api/bh/objects.csv?" + qsx.toString();
+  };
+  qs("#drClose").onclick = drClose;
+  qs("#drBack").onclick = () => { const id = DR_HIST.pop(); if (id) drOpen(id, true); };
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && !qs("#bhDrawer").classList.contains("hidden")) drClose(); });
 }
 
 /* ======================= config / session ======================= */
@@ -924,7 +1099,10 @@ async function stopTask() {
     note(RUN_STATE==="input" ? "nothing is running (answer or leave the form)" : "nothing is running");
     return;
   }
-  if (CUR_ENTRY) resClose("stopped");
+  if (CUR_ENTRY && (CUR_ENTRY.status === "running" || CUR_ENTRY.status === "waiting")) {
+    // keep it as the current card: the tool's last lines still belong to it
+    CUR_ENTRY.status = "stopped"; CUR_ENTRY.ended = Date.now(); resMark(CUR_ENTRY);
+  }
   const names = [...new Set(j.stopped.map(p=>p.cmd.split(" ")[0].split("/").pop()).filter(Boolean))];
   note(`^C stopped: ${names.slice(0,6).join(", ")}`);
 }
@@ -1052,7 +1230,8 @@ async function init(){
 
   // reattach to a session already running (page reload): scrollback replays the state
   const s = await api("/api/session/status").then(r=>r.json()).catch(()=>null);
-  if (s && s.running) { SESSION_ID = s.id; resRestore(s.id); SESSION_RUNNING=true; setTopStatus(true); setRunState("running");
+  resRestore(s && s.running ? s.id : null);
+  if (s && s.running) { SESSION_ID = s.id; SESSION_RUNNING=true; setTopStatus(true); setRunState("running");
     qs("#cfgBar").classList.add("running"); lwpTerm.connect(); }
 
   setInterval(async()=>{

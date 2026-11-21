@@ -8,7 +8,7 @@ The dashboard does not rewrite any linWinPwn logic. The backend starts the real 
 
 ![Results view](docs/screenshots/03_results_batch_card.png)
 
-More screenshots in [docs/screenshots](docs/screenshots): [session bar](docs/screenshots/01_config_bar_advanced.png), [question form](docs/screenshots/02_results_question_waiting.png), [terminal view](docs/screenshots/04_terminal_view.png), [Auto mode](docs/screenshots/05_auto_mode_results.png).
+More screenshots in [docs/screenshots](docs/screenshots): [session bar](docs/screenshots/01_config_bar_advanced.png), [question form](docs/screenshots/02_results_question_waiting.png), [terminal view](docs/screenshots/04_terminal_view.png), [Auto mode](docs/screenshots/05_auto_mode_results.png), [BloodHound overview](docs/screenshots/06_bloodhound_overview.png), [BloodHound explorer](docs/screenshots/07_bloodhound_explorer.png), [findings + detail panel](docs/screenshots/08_bloodhound_findings_detail.png).
 
 ## Features
 
@@ -35,7 +35,7 @@ More screenshots in [docs/screenshots](docs/screenshots): [session bar](docs/scr
 - **Command history**: every command linWinPwn runs (already masked by the script), with copy buttons.
 - **Embedded shell**: a separate bash in the repo folder, for manual commands (netexec, impacket, certipy...). It keeps running when you switch tabs.
 - **Output / loot**: read-only browser of the output folder, with preview and download (binary files offered as download).
-- **BloodHound tab**: load a collection (the zip linWinPwn produces, a folder of `*_users.json`, or a single json) and get an inventory of the directory plus the AD hygiene problems worth fixing, each with the objects concerned and a remediation note. Export the whole thing as Markdown for a report. See the section below for what it does and does not do.
+- **BloodHound tab**: load a collection and get an overview with charts, about 45 AD hygiene checks with the objects concerned and how to fix them, and an explorer of every object with a detail panel. Markdown and CSV exports. See the section below for what it does and does not do.
 - Secrets (`-p`, `-H`, `-A`, `--cert-pass`) are hidden in the command line shown back in the UI.
 
 ## Run it
@@ -78,15 +78,24 @@ If you type in the terminal yourself, the UI still follows, since it reads the h
 
 ## BloodHound tab
 
-Drop a collection on the tab, or pick one it finds in your output folder, and you get:
+Drop a collection on the tab (the zip linWinPwn produces, a folder of `*_users.json`, or a single json), or pick one it finds in your output folder. Reads bloodhound-python, SharpHound v3+ and CE output. Three views:
 
-- **Inventory**: users, computers, groups, OUs, GPOs, domain controllers, Domain Admins, with enabled vs total; size of each privileged group; breakdown of operating systems (obsolete ones in orange).
-- **Hygiene checks**, sorted by severity, each with why it matters, what to do about it, and the list of objects concerned: stale and never-used accounts, passwords that never expire or are over a year old, accounts that do not require a password, Kerberos pre-authentication disabled, user accounts used as services (SPN), privileged group membership, admin accounts not marked sensitive, krbtgt rotation, unconstrained and constrained delegation, unsupported operating systems, Windows 10 end of support, computers without LAPS, credentials left in description fields, domain functional level, trusts without SID filtering, and certificate services (CA accepting a requester-supplied subject, templates where the requester chooses the subject).
-- **Export** as Markdown, with the full object lists, ready to paste into a client report.
+**Overview.** Users, computers (servers vs workstations), Domain Admins and privileged accounts, DCs, groups, OUs, GPOs, certificate templates and CAs. Charts of user last logon, user password age and computer last logon (by age bucket). Privileged group sizes, operating systems (obsolete ones in orange), domain controllers with their OS, domains, functional level and trusts. Every card opens the matching list in the Explorer.
 
-Reads bloodhound-python, SharpHound v3+ and CE output. Uploads go to `lwp-output/_bh_uploads/`, are only ever parsed as JSON, and a failed upload is deleted; the last 10 are kept.
+**Findings.** About 45 hygiene checks, sorted by severity, each with why it matters, what to do, and the objects concerned. Search (also by object name) and severity filter. Covers:
+- accounts: stale and never used, recently created, disabled, password never expires / not required / older than a year / never changed since creation, Kerberos pre-authentication disabled, user accounts used as services (SPN), passwords in readable attributes (`userPassword`, `unixUserPassword`...), credentials in descriptions, logon scripts, SID history, objects left in `CN=Users` / `CN=Computers`
+- privileged accounts: group membership, admins used as services, inactive admins, old admin passwords, admins with a mailbox, admins not marked sensitive, disabled accounts still in admin groups, computers in admin groups, rights given through deep nesting (with the chain), orphaned `adminCount`, operator / Schema / Enterprise Admins not empty, built-in Administrator and Guest, krbtgt rotation
+- machines: unsupported OS (DCs separately), Windows 10, no LAPS, unconstrained and constrained delegation, inactive computers, machine passwords not renewed
+- domain: single DC, functional level, trusts without SID filtering, Pre-Windows 2000 Compatible Access with broad groups, default password policy and `ms-DS-MachineAccountQuota` (when the collector provides them), empty groups, GPOs linked nowhere
+- certificate services: CA accepting a requester-supplied subject, templates where the requester picks the subject, templates usable for any purpose
 
-**Scope.** This tab counts and describes. It does not compute attack paths, does not rank objects by exploitability, and does not link findings to attack tooling. For attack path analysis, import the same collection into BloodHound CE.
+**Explorer.** Every object of the collection in a table: Users, Computers, Groups, OUs, GPOs, certificate templates, CAs, domains. Search, sort by any column, filters (enabled, disabled, privileged, stale 90d+, flagged), pages of 50, CSV export of the current view. Click a row (or any object in a finding, or a DC in the Overview) to open its detail panel: the findings that concern it, a summary, direct groups and groups reached through nesting, members (for groups), where a GPO is linked, and every attribute collected. Groups and members are clickable, with a back button.
+
+Export the whole report as Markdown (inventory, DCs, activity table, findings with full object lists) for a client report.
+
+Uploads go to `lwp-output/_bh_uploads/` (hidden from Output / loot), are only ever parsed as JSON, and a failed upload is deleted; the last 10 are kept. Tested on a synthetic 42,000-object domain: under a second to analyse, a fraction of a second per Explorer query.
+
+**Scope.** This tab inventories the directory and checks its hygiene. It does not compute attack paths or analyse ACLs between objects. For that, use BloodHound CE on the same collection.
 
 ## Security
 
@@ -117,7 +126,7 @@ python3 web_ui/tests/check_menus.py
 
 It checks every button against the script's menus (reads the script only, runs nothing) and lists options missing from the dashboard.
 
-The BloodHound inventory has its own tests (synthetic collection, no network, no AD):
+The BloodHound inventory has its own tests (75 assertions on a synthetic collection that triggers every check; no network, no AD):
 
 ```bash
 python3 web_ui/tests/test_bh_inventory.py

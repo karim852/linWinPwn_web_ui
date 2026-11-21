@@ -61,7 +61,7 @@ app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = BH_MAX_UPLOAD
 sock = Sock(app)
 
-BH_REPORT = {"data": None}      # last inventory report
+BH_REPORT = {"data": None, "inv": None}      # last inventory report + object
 
 
 # --------------------------------------------------------------------------- #
@@ -632,7 +632,9 @@ def _bh_analyse(paths, label=""):
     except Exception as e:
         return jsonify({"ok": False, "error": f"could not parse: {e}"}), 500
     rep = inv.report()
+    rep["type_counts"] = inv.type_counts()
     BH_REPORT["data"] = rep
+    BH_REPORT["inv"] = inv
     return jsonify({"ok": True, "report": rep})
 
 
@@ -641,6 +643,68 @@ def api_bh_report():
     if not BH_REPORT["data"]:
         return jsonify({"ok": False, "error": "nothing analysed yet"}), 404
     return jsonify({"ok": True, "report": BH_REPORT["data"]})
+
+
+def _bh_inv():
+    inv = BH_REPORT.get("inv")
+    if not inv:
+        abort(404)
+    return inv
+
+
+@app.route("/api/bh/objects")
+def api_bh_objects():
+    inv = _bh_inv()
+    a = request.args
+    try:
+        res = inv.query(a.get("type", "User"), q=a.get("q", ""), sort=a.get("sort", "name"),
+                        desc=a.get("desc") == "1", page=int(a.get("page", 0) or 0),
+                        size=int(a.get("size", 50) or 50), flt=a.get("filter", ""))
+    except (ValueError, TypeError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    res.pop("all", None)
+    return jsonify({"ok": True, **res})
+
+
+@app.route("/api/bh/objects.csv")
+def api_bh_objects_csv():
+    import csv, io
+    inv = _bh_inv()
+    a = request.args
+    try:
+        res = inv.query(a.get("type", "User"), q=a.get("q", ""), sort=a.get("sort", "name"),
+                        desc=a.get("desc") == "1", size=1, flt=a.get("filter", ""))
+    except (ValueError, TypeError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    cols = res["cols"]
+    w.writerow(cols)
+    for r in res["all"]:
+        row = []
+        for c in cols:
+            v = r.get(c)
+            if isinstance(v, list):
+                v = "; ".join(map(str, v))
+            elif v is None:
+                v = "never" if c in ("last_logon", "pwd_age") else ""
+            # keep spreadsheet apps from evaluating cell content as a formula
+            if isinstance(v, str) and v[:1] in ("=", "+", "-", "@"):
+                v = "'" + v
+            row.append(v)
+        w.writerow(row)
+    fname = f"ad-{res['type'].lower()}s-{time.strftime('%Y%m%d-%H%M')}.csv"
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@app.route("/api/bh/object")
+def api_bh_object():
+    inv = _bh_inv()
+    d = inv.detail(request.args.get("id", ""))
+    if not d:
+        return jsonify({"ok": False, "error": "unknown object"}), 404
+    return jsonify({"ok": True, "object": d})
 
 
 @app.route("/api/bh/export")
@@ -669,6 +733,16 @@ def api_bh_export():
          f"| Domain controllers | {st['dcs']} | |",
          f"| Domain Admins | {st['domain_admins']} | |",
          "",
+         "## Domain controllers",
+         ""] + [f"- `{d['name']}` - {d.get('os') or 'unknown OS'}" for d in rep.get("overview", {}).get("dcs", [])] + [
+         "",
+         "## Account activity",
+         "",
+         "| Last logon | Users | Computers |",
+         "|---|---|---|"] + [
+         f"| {u['label']} | {u['count']} | {c['count']} |"
+         for u, c in zip(rep.get("charts", {}).get("user_logon", []), rep.get("charts", {}).get("computer_logon", []))] + [
+         "",
          "## Findings",
          ""]
     for c in rep["checks"]:
@@ -696,6 +770,51 @@ def api_bh_export():
 # --------------------------------------------------------------------------- #
 # WebSockets
 # --------------------------------------------------------------------------- #
+class _LockedSock:
+    """simple_websocket writes frames with sock.send(), which may send only part
+    of the data, and from two threads (our output pump and its own close/pong
+    replies). Either one corrupts the stream ("Invalid frame header"). Every
+    write goes through one lock and sendall()."""
+
+    def __init__(self, sock):
+        self._sock = sock
+        self._lock = threading.Lock()
+
+    def send(self, data):
+        with self._lock:
+            self._sock.sendall(data)
+        return len(data)
+
+    sendall = send
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+def _harden(ws):
+    if not isinstance(ws.sock, _LockedSock):
+        ws.sock = _LockedSock(ws.sock)
+    return ws
+
+
+def _finish(ws):
+    """Close the websocket, then the raw socket. Under the Werkzeug dev server,
+    flask-sock lets Werkzeug write a plain 'HTTP/1.1 200 OK' response onto the
+    connection after the websocket is over; browsers read it as a broken frame
+    ('Invalid frame header'). With the socket shut down, that write goes nowhere."""
+    import socket as _socket
+    try:
+        ws.close()
+    except Exception:
+        pass
+    time.sleep(0.05)
+    raw = ws.sock._sock if isinstance(ws.sock, _LockedSock) else ws.sock
+    try:
+        raw.shutdown(_socket.SHUT_RDWR)
+    except Exception:
+        pass
+
+
 def _pump(ws, sess):
     """Stream PTY output to the websocket until either side closes."""
     # replay scrollback so a reconnecting tab sees prior output
@@ -707,6 +826,8 @@ def _pump(ws, sess):
             return
     while True:
         if not sess.alive and sess.fd is None:
+            break
+        if not ws.connected:
             break
         data = sess.read(timeout=0.1)
         if data:
@@ -724,8 +845,9 @@ def _pump(ws, sess):
                     except Exception:
                         pass
                 try:
+                    # only the handler thread closes the socket; closing here too
+                    # sent a second close frame ("Invalid frame header" in browsers)
                     ws.send("\r\n\x1b[33m[web-ui] process exited\x1b[0m\r\n")
-                    ws.close()
                 except Exception:
                     pass
                 break
@@ -733,6 +855,14 @@ def _pump(ws, sess):
 
 @sock.route("/ws/linwinpwn")
 def ws_linwinpwn(ws):
+    _harden(ws)
+    try:
+        _ws_linwinpwn(ws)
+    finally:
+        _finish(ws)
+
+
+def _ws_linwinpwn(ws):
     if not check_token_ws(ws):
         ws.close()
         return
@@ -755,6 +885,14 @@ def ws_linwinpwn(ws):
 
 @sock.route("/ws/shell")
 def ws_shell(ws):
+    _harden(ws)
+    try:
+        _ws_shell(ws)
+    finally:
+        _finish(ws)
+
+
+def _ws_shell(ws):
     if not check_token_ws(ws):
         ws.close()
         return

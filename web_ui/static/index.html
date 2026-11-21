@@ -251,24 +251,82 @@
               <span class="crumb" id="bhLabel"></span>
               <span class="bh-sev" id="bhSevChips"></span>
               <div class="spacer"></div>
+              <div class="seg" id="bhTabs">
+                <button type="button" data-bt="overview" class="active">Overview</button>
+                <button type="button" data-bt="findings">Findings <span class="tab-count" id="bhCount">0</span></button>
+                <button type="button" data-bt="explorer">Explorer</button>
+              </div>
               <button class="btn btn-ghost sm" id="bhExport">export .md</button>
               <button class="btn btn-ghost sm" id="bhNew">load another</button>
             </div>
-            <div class="bh-body">
+
+            <div class="bh-body" data-bp="overview">
               <div class="bh-stats" id="bhStats"></div>
-              <div class="bh-cols">
-                <div class="bh-col">
-                  <h4>Privileged groups</h4>
-                  <div id="bhPriv" class="bh-bars"></div>
-                </div>
-                <div class="bh-col">
-                  <h4>Operating systems</h4>
-                  <div id="bhOs" class="bh-bars"></div>
-                </div>
+              <div class="bh-cols3">
+                <div class="bh-col"><h4>User last logon</h4><div id="chUserLogon" class="bh-bars"></div></div>
+                <div class="bh-col"><h4>User password age</h4><div id="chUserPwd" class="bh-bars"></div></div>
+                <div class="bh-col"><h4>Computer last logon</h4><div id="chCompLogon" class="bh-bars"></div></div>
               </div>
-              <h4 class="bh-h">Findings <span class="dim" id="bhCount"></span></h4>
+              <div class="bh-cols">
+                <div class="bh-col"><h4>Privileged groups</h4><div id="bhPriv" class="bh-bars"></div></div>
+                <div class="bh-col"><h4>Operating systems</h4><div id="bhOs" class="bh-bars"></div></div>
+              </div>
+              <div class="bh-cols">
+                <div class="bh-col"><h4>Domain controllers</h4><div id="bhDcs" class="kv-list"></div></div>
+                <div class="bh-col"><h4>Domains and trusts</h4><div id="bhDoms" class="kv-list"></div></div>
+              </div>
+            </div>
+
+            <div class="bh-body hidden" data-bp="findings">
+              <div class="bh-tools">
+                <input id="bhFindFilter" class="res-filter" placeholder="search findings and objects…">
+                <div class="seg sm" id="bhSevFilter">
+                  <button type="button" data-sev="all" class="active">all</button>
+                  <button type="button" data-sev="high">high</button>
+                  <button type="button" data-sev="medium">medium</button>
+                  <button type="button" data-sev="low">low</button>
+                  <button type="button" data-sev="info">info</button>
+                </div>
+                <div class="spacer"></div>
+                <button type="button" class="btn btn-ghost sm" id="bhExpandAll">expand all</button>
+              </div>
               <div id="bhChecks" class="bh-checks"></div>
             </div>
+
+            <div class="bh-body hidden" data-bp="explorer">
+              <div class="bh-tools">
+                <div class="seg sm" id="exType"></div>
+                <input id="exSearch" class="res-filter" placeholder="search name, OU, description, flags…">
+                <div class="seg sm" id="exFilter">
+                  <button type="button" data-f="" class="active">all</button>
+                  <button type="button" data-f="enabled">enabled</button>
+                  <button type="button" data-f="disabled">disabled</button>
+                  <button type="button" data-f="privileged">privileged</button>
+                  <button type="button" data-f="stale">stale 90d+</button>
+                  <button type="button" data-f="flagged">flagged</button>
+                </div>
+                <div class="spacer"></div>
+                <button type="button" class="btn btn-ghost sm" id="exCsv">export .csv</button>
+              </div>
+              <div class="ex-wrap"><table class="ex-table" id="exTable"><thead></thead><tbody></tbody></table></div>
+              <div class="ex-pager">
+                <span class="dim" id="exInfo"></span>
+                <div class="spacer"></div>
+                <button type="button" class="btn btn-ghost sm" id="exPrev">‹ prev</button>
+                <span class="dim" id="exPage"></span>
+                <button type="button" class="btn btn-ghost sm" id="exNext">next ›</button>
+              </div>
+            </div>
+
+            <aside class="drawer hidden" id="bhDrawer">
+              <div class="dr-head">
+                <div><div class="dr-type" id="drType"></div><div class="dr-title" id="drTitle"></div></div>
+                <div class="spacer"></div>
+                <button type="button" class="btn btn-ghost sm" id="drBack" title="previous object">‹</button>
+                <button type="button" class="btn btn-ghost sm" id="drClose">✕</button>
+              </div>
+              <div class="dr-body" id="drBody"></div>
+            </aside>
           </div>
         </div>
       </section>

@@ -117,6 +117,7 @@
         <button data-tab="shell">Embedded shell</button>
         <button data-tab="history">Command history <span id="histCount" class="tab-count">0</span></button>
         <button data-tab="bh">BloodHound</button>
+        <button data-tab="creds">Credentials <span id="credCount" class="tab-count">0</span></button>
         <button data-tab="loot">Output / loot</button>
       </div>
 
@@ -331,6 +332,50 @@
         </div>
       </section>
 
+      <section class="tabpane hidden" data-tab="creds">
+        <div class="creds">
+          <div class="cred-bar">
+            <div class="cred-stats" id="credStats"></div>
+            <div class="spacer"></div>
+            <button class="btn btn-ghost sm" id="credRescan" title="Re-read the output folder">rescan</button>
+          </div>
+          <div class="cred-tools">
+            <input id="credSearch" class="res-filter" placeholder="search account, domain, hash, source…">
+            <div class="seg sm" id="credType">
+              <button type="button" data-t="all" class="active">all</button>
+              <button type="button" data-t="ntlm">NTLM</button>
+              <button type="button" data-t="cleartext">cleartext</button>
+              <button type="button" data-t="kerberos-key">kerberos keys</button>
+              <button type="button" data-t="kerberoast">kerberoast</button>
+              <button type="button" data-t="asrep">AS-REP</button>
+            </div>
+            <div class="seg sm" id="credCracked">
+              <button type="button" data-c="all" class="active">all</button>
+              <button type="button" data-c="cracked">cracked</button>
+              <button type="button" data-c="uncracked">uncracked</button>
+            </div>
+            <div class="spacer"></div>
+            <label class="ck sm" title="Show every value in clear"><input type="checkbox" id="credReveal"> reveal all</label>
+            <button type="button" class="btn btn-ghost sm" id="credAdd">+ add</button>
+            <div class="exp-menu">
+              <button type="button" class="btn btn-ghost sm" id="credExport">export ▾</button>
+              <div class="exp-pop hidden" id="credExpPop">
+                <button type="button" data-fmt="md" data-rev="0">Markdown · masked</button>
+                <button type="button" data-fmt="md" data-rev="1">Markdown · full values</button>
+                <button type="button" data-fmt="csv" data-rev="0">CSV · masked</button>
+                <button type="button" data-fmt="csv" data-rev="1">CSV · full values</button>
+              </div>
+            </div>
+          </div>
+          <div class="cred-note" id="credEmpty">
+            Nothing yet. linWinPwn writes hashes and passwords into <code>Credentials/</code> and
+            <code>Kerberos/</code> in your output folder as you run dumps; they show up here. Use
+            <b>rescan</b> after a run, or <b>+ add</b> to record one by hand.
+          </div>
+          <div class="cred-wrap"><table class="cred-table" id="credTable"><thead></thead><tbody></tbody></table></div>
+        </div>
+      </section>
+
       <section class="tabpane hidden" data-tab="loot">
         <div class="loot">
           <div class="loot-bar">
@@ -347,6 +392,33 @@
       </section>
     </main>
   </div>
+
+<div class="cred-modal hidden" id="credModal">
+  <form class="cred-form" id="credForm" autocomplete="off">
+    <div class="cf-title">Add a credential by hand</div>
+    <div class="cred-grid">
+      <label>Type
+        <select id="ca_type">
+          <option value="ntlm">NTLM hash</option>
+          <option value="cleartext">Cleartext password</option>
+          <option value="kerberos-key">Kerberos key</option>
+          <option value="kerberoast">Kerberoast hash</option>
+          <option value="asrep">AS-REP hash</option>
+        </select></label>
+      <label>Domain<input id="ca_domain" placeholder="corp.local"></label>
+      <label><span>Username <span class="req">*</span></span><input id="ca_user" placeholder="jsmith"></label>
+      <label>RID<input id="ca_rid" placeholder="1104"></label>
+    </div>
+    <label><span>Value <span class="req">*</span></span><input id="ca_value" placeholder="hash or password"></label>
+    <label>Cracked password (optional)<input id="ca_cracked"></label>
+    <label>Notes<input id="ca_notes"></label>
+    <div id="ca_err" class="cfg-error hidden"></div>
+    <div class="cred-form-btns">
+      <button type="button" class="btn btn-ghost" id="ca_cancel">cancel</button>
+      <button type="submit" class="btn btn-primary">Add</button>
+    </div>
+  </form>
+</div>
 </div>
 
 <script src="/static/vendor/xterm.js"></script>

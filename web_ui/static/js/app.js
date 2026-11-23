@@ -996,6 +996,145 @@ function wireBh() {
     if (e.key === "Escape" && !qs("#bhDrawer").classList.contains("hidden")) drClose(); });
 }
 
+
+/* ======================= Credentials vault =======================
+   Reads what the tools already wrote to the output folder. Masks every
+   value by default; reveal and export are explicit. */
+let CREDS_LOADED = false;
+let CREDS = {records: [], stats: {}};
+const CV = {type: "all", cracked: "all", q: "", sort: "type", desc: false, reveal: false};
+const CRED_REVEALED = new Set();
+
+async function credsScan(rescan) {
+  const j = await api("/api/creds/" + (rescan ? "scan" : "report")).then(r => r.json()).catch(() => ({}));
+  if (!j.ok) return;
+  CREDS = j; CRED_REVEALED.clear(); (j.records || []).forEach(r => { r.full = null; r.full_cracked = null; });
+  qs("#credCount").textContent = j.stats.total || 0;
+  credsRender();
+}
+
+function credsStats() {
+  const st = CREDS.stats || {};
+  const el = qs("#credStats");
+  el.innerHTML =
+    `<span class="cred-pill"><b>${st.total || 0}</b> secrets</span>` +
+    `<span class="cred-pill"><b>${st.users || 0}</b> accounts</span>` +
+    `<span class="cred-pill crack"><b>${st.cracked || 0}</b> cracked / cleartext</span>` +
+    Object.entries(st.by_type || {}).map(([k, n]) => `<span class="cred-pill">${k} <b>${n}</b></span>`).join("") +
+    (st.files ? `<span class="cred-pill">${st.files} files</span>` : "");
+}
+
+const CRED_COLS = [["type","Type"],["account","Account"],["value","Value"],["cracked","Cracked"],["sources","Source"],["notes","Notes"],["",""]];
+function credsSorted() {
+  let rows = CREDS.records.slice();
+  if (CV.type !== "all") rows = rows.filter(r => r.type === CV.type);
+  if (CV.cracked === "cracked") rows = rows.filter(r => r.is_cracked);
+  if (CV.cracked === "uncracked") rows = rows.filter(r => !r.is_cracked);
+  if (CV.q) { const q = CV.q.toLowerCase();
+    rows = rows.filter(r => (r.type + " " + r.domain + " " + r.username + " " + r.value + " " + (r.cracked||"") + " " + r.sources.join(" ") + " " + r.notes).toLowerCase().includes(q)); }
+  const key = r => CV.sort === "account" ? (r.domain + "\\" + r.username).toLowerCase()
+    : CV.sort === "cracked" ? (r.is_cracked ? 0 : 1)
+    : CV.sort === "sources" ? (r.sources[0] || "")
+    : (r[CV.sort] || "").toString().toLowerCase();
+  rows.sort((a, b) => { const ka = key(a), kb = key(b); return (ka < kb ? -1 : ka > kb ? 1 : 0) * (CV.desc ? -1 : 1); });
+  return rows;
+}
+
+function credsRender() {
+  credsStats();
+  const rows = credsSorted();
+  qs("#credEmpty").style.display = CREDS.records.length ? "none" : "";
+  const thead = qs("#credTable thead"), tbody = qs("#credTable tbody");
+  thead.innerHTML = "<tr>" + CRED_COLS.map(([c, l]) => c
+    ? `<th data-c="${c}" class="${c === CV.sort ? "sorted" : ""}">${l}${c === CV.sort ? (CV.desc ? " ↓" : " ↑") : ""}</th>` : "<th></th>").join("") + "</tr>";
+  qsa("#credTable th[data-c]").forEach(th => th.onclick = () => {
+    if (CV.sort === th.dataset.c) CV.desc = !CV.desc; else { CV.sort = th.dataset.c; CV.desc = false; } credsRender(); });
+  if (!rows.length) { tbody.innerHTML = `<tr class="cred-empty-row"><td colspan="7">${CREDS.records.length ? "no credential matches" : "nothing collected yet"}</td></tr>`; return; }
+  tbody.innerHTML = rows.map(r => {
+    const shown = CV.reveal || CRED_REVEALED.has(r.key);
+    const disp = shown && r.full != null ? r.full : r.value;
+    const crkDisp = shown && r.full_cracked != null ? r.full_cracked : r.cracked;
+    const acct = `<span class="cred-acct">${r.domain ? `<span class="dom">${esc(r.domain)}\\</span>` : ""}${esc(r.username)}${r.rid ? `<span class="dom"> ·${esc(r.rid)}</span>` : ""}${r.manual ? `<span class="cred-tag">manual</span>` : ""}</span>`;
+    const val = (shown && r.full != null)
+      ? `<span class="cred-val">${esc(disp)}</span><span class="cred-copy" data-copy="${esc(r.key)}" title="copy">⧉</span>`
+      : `<span class="cred-val masked">${esc(r.value)}</span><span class="cred-reveal" data-reveal="${esc(r.key)}">reveal</span>`;
+    const crk = r.is_cracked
+      ? `<span class="cred-cracked">${esc(crkDisp)}</span>`
+      : `<span class="cred-cracked no" data-mark="${esc(r.key)}" title="mark as cracked">— set</span>`;
+    const src = r.sources.map(sp => sp === "manual entry" ? `<span class="dim">manual</span>`
+      : `<span class="cred-src" data-src="${esc(sp)}" title="${esc(sp)}">${esc(sp.split("/").pop())}</span>`).join(" ");
+    return `<tr data-key="${esc(r.key)}"><td><span class="cred-type ${r.type}">${r.type}</span></td>` +
+      `<td>${acct}</td><td>${val}</td><td>${crk}</td><td>${src}</td>` +
+      `<td><input class="cred-notes" data-note="${esc(r.key)}" value="${esc(r.notes)}" placeholder="…"></td>` +
+      `<td>${r.manual ? `<span class="cred-del" data-del="${esc(r.key)}" title="delete">✕</span>` : ""}</td></tr>`;
+  }).join("");
+
+  tbody.querySelectorAll("[data-reveal]").forEach(el => el.onclick = async () => {
+    const j = await api("/api/creds/reveal?key=" + encodeURIComponent(el.dataset.reveal)).then(r => r.json()).catch(() => ({}));
+    if (j.ok) { const r = CREDS.records.find(x => x.key === el.dataset.reveal); if (r) { r.full = j.record.value; r.full_cracked = j.record.cracked; } CRED_REVEALED.add(el.dataset.reveal); credsRender(); }
+  });
+  tbody.querySelectorAll("[data-copy]").forEach(el => el.onclick = () => {
+    const r = CREDS.records.find(x => x.key === el.dataset.copy); if (r) { navigator.clipboard?.writeText(r.full ?? r.value); el.textContent = "✓"; setTimeout(() => el.textContent = "⧉", 1000); }
+  });
+  tbody.querySelectorAll("[data-src]").forEach(el => el.onclick = () => openLootFile(el.dataset.src));
+  tbody.querySelectorAll("[data-mark]").forEach(el => el.onclick = async () => {
+    const pw = prompt("Cracked password for this account (leave empty to cancel):"); if (!pw) return;
+    await api("/api/creds/update", {method: "POST", body: JSON.stringify({key: el.dataset.mark, cracked: pw})});
+    const r = CREDS.records.find(x => x.key === el.dataset.mark); if (r) { r.cracked = "••••••"; r.full_cracked = pw; r.is_cracked = true; } credsRender();
+  });
+  tbody.querySelectorAll("[data-note]").forEach(el => {
+    el.onchange = () => api("/api/creds/update", {method: "POST", body: JSON.stringify({key: el.dataset.note, notes: el.value})});
+    el.onclick = e => e.stopPropagation();
+  });
+  tbody.querySelectorAll("[data-del]").forEach(el => el.onclick = async () => {
+    if (!confirm("Delete this manual entry?")) return;
+    const j = await api("/api/creds/delete", {method: "POST", body: JSON.stringify({key: el.dataset.del})}).then(r => r.json());
+    if (j.ok) { CREDS = j; qs("#credCount").textContent = j.stats.total; credsRender(); }
+  });
+}
+
+function wireCreds() {
+  qs("#credRescan").onclick = () => credsScan(true);
+  qs("#credReveal").onchange = e => { CV.reveal = e.target.checked;
+    if (CV.reveal && !confirm("Show every value in clear on screen?")) { e.target.checked = false; CV.reveal = false; return; }
+    if (!CV.reveal) return credsRender();   // off: masks stay (r.value), only per-row reveals remain
+    (async () => {
+      for (const r of CREDS.records) if (r.full == null) {
+        const j = await api("/api/creds/reveal?key=" + encodeURIComponent(r.key)).then(x => x.json()).catch(() => ({}));
+        if (j.ok) { r.full = j.record.value; r.full_cracked = j.record.cracked; }
+      }
+      credsRender();
+    })();
+  };
+  qsa("#credType button").forEach(b => b.onclick = () => { qsa("#credType button").forEach(x => x.classList.toggle("active", x === b)); CV.type = b.dataset.t; credsRender(); });
+  qsa("#credCracked button").forEach(b => b.onclick = () => { qsa("#credCracked button").forEach(x => x.classList.toggle("active", x === b)); CV.cracked = b.dataset.c; credsRender(); });
+  let t = null;
+  qs("#credSearch").oninput = e => { clearTimeout(t); t = setTimeout(() => { CV.q = e.target.value.trim(); credsRender(); }, 150); };
+  const pop = qs("#credExpPop");
+  qs("#credExport").onclick = e => { e.stopPropagation(); pop.classList.toggle("hidden"); };
+  document.addEventListener("click", () => pop.classList.add("hidden"));
+  pop.onclick = e => e.stopPropagation();
+  qsa("#credExpPop button").forEach(b => b.onclick = () => {
+    pop.classList.add("hidden");
+    if (b.dataset.rev === "1" && !confirm("Export every value in clear? Keep the file somewhere safe.")) return;
+    location.href = `/api/creds/export.${b.dataset.fmt}?reveal=${b.dataset.rev}&token=${encodeURIComponent(TOKEN)}`;
+  });
+  // add modal
+  const modal = qs("#credModal");
+  qs("#credAdd").onclick = () => { qs("#ca_err").classList.add("hidden"); qs("#credForm").reset(); modal.classList.remove("hidden"); qs("#ca_user").focus(); };
+  qs("#ca_cancel").onclick = () => modal.classList.add("hidden");
+  modal.onclick = e => { if (e.target === modal) modal.classList.add("hidden"); };
+  qs("#credForm").onsubmit = async e => {
+    e.preventDefault();
+    const body = {type: qs("#ca_type").value, domain: qs("#ca_domain").value, username: qs("#ca_user").value,
+                  rid: qs("#ca_rid").value, value: qs("#ca_value").value, cracked: qs("#ca_cracked").value, notes: qs("#ca_notes").value};
+    const j = await api("/api/creds/add", {method: "POST", body: JSON.stringify(body)}).then(r => r.json()).catch(() => ({}));
+    if (!j.ok) { const er = qs("#ca_err"); er.textContent = j.error || "could not add"; er.classList.remove("hidden"); return; }
+    CREDS = j; qs("#credCount").textContent = j.stats.total; CRED_REVEALED.clear(); modal.classList.add("hidden"); credsRender();
+  };
+  document.addEventListener("keydown", e => { if (e.key === "Escape") modal.classList.add("hidden"); });
+}
+
 /* ======================= config / session ======================= */
 function readConfig() {
   const v = id => (qs("#"+id)?.value||"").trim();
@@ -1132,6 +1271,7 @@ function switchTab(name){
   }
   if (name==="loot") loadLoot(lootPath);
   if (name==="bh" && !BH_LOADED) { BH_LOADED = true; bhDiscover(); }
+  if (name==="creds" && !CREDS_LOADED) { CREDS_LOADED = true; credsScan(); }
 }
 
 /* ======================= loot browser ======================= */
@@ -1214,6 +1354,7 @@ function wire(){
   qs("#histCopyAll").onclick=()=>navigator.clipboard?.writeText(HISTORY.map(h=>h.cmd).join("\n"));
   qs("#histClear").onclick=()=>{ HISTORY.length=0; qs("#histList").innerHTML=""; qs("#histCount").textContent="0"; };
   wireBh();
+  wireCreds();
 }
 
 async function init(){

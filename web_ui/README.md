@@ -8,7 +8,7 @@ The dashboard does not rewrite any linWinPwn logic. The backend starts the real 
 
 ![Results view](docs/screenshots/03_results_batch_card.png)
 
-More screenshots in [docs/screenshots](docs/screenshots): [session bar](docs/screenshots/01_config_bar_advanced.png), [question form](docs/screenshots/02_results_question_waiting.png), [terminal view](docs/screenshots/04_terminal_view.png), [Auto mode](docs/screenshots/05_auto_mode_results.png), [BloodHound overview](docs/screenshots/06_bloodhound_overview.png), [BloodHound explorer](docs/screenshots/07_bloodhound_explorer.png), [findings + detail panel](docs/screenshots/08_bloodhound_findings_detail.png).
+More screenshots in [docs/screenshots](docs/screenshots): [session bar](docs/screenshots/01_config_bar_advanced.png), [question form](docs/screenshots/02_results_question_waiting.png), [terminal view](docs/screenshots/04_terminal_view.png), [Auto mode](docs/screenshots/05_auto_mode_results.png), [BloodHound overview](docs/screenshots/06_bloodhound_overview.png), [BloodHound explorer](docs/screenshots/07_bloodhound_explorer.png), [findings + detail panel](docs/screenshots/08_bloodhound_findings_detail.png), [credentials](docs/screenshots/09_credentials.png), [add a credential by hand](docs/screenshots/10_credentials_manual_add.png).
 
 ## Features
 
@@ -35,6 +35,7 @@ More screenshots in [docs/screenshots](docs/screenshots): [session bar](docs/scr
 - **Command history**: every command linWinPwn runs (already masked by the script), with copy buttons.
 - **Embedded shell**: a separate bash in the repo folder, for manual commands (netexec, impacket, certipy...). It keeps running when you switch tabs.
 - **Output / loot**: read-only browser of the output folder, with preview and download (binary files offered as download).
+- **Credentials tab**: one place for the hashes and passwords collected during the assessment. It reads what linWinPwn already wrote to `Credentials/`, `Kerberos/` and `BruteForce/` in your output folder (NTLM hashes from SAM/LSA/NTDS dumps, Kerberos keys, cleartext passwords incl. LAPS and gMSA, Kerberoast and AS-REP hashes), removes duplicates while keeping every source file (click to open it in Output / loot), and marks what is cracked: cleartext values, empty-password hashes, and accounts found in the john result files. Everything is masked by default; reveal one value or all, copy, sort, filter by type or cracked status, search. **+ add** records a credential the tool did not detect (found in a share, a script, on a sticky note...); manual entries, notes and "cracked" marks are kept in `_creds_vault.json` (owner-only permissions) and survive rescans. Export to Markdown or CSV, masked or with full values.
 - **BloodHound tab**: load a collection and get an overview with charts, about 45 AD hygiene checks with the objects concerned and how to fix them, and an explorer of every object with a detail panel. Markdown and CSV exports. See the section below for what it does and does not do.
 - Secrets (`-p`, `-H`, `-A`, `--cert-pass`) are hidden in the command line shown back in the UI.
 
@@ -111,10 +112,12 @@ This console runs offensive tooling and gives a full shell with the rights of th
 |---|---|
 | `server.py` | Flask backend: PTY manager, websockets, session API, loot browser |
 | `menus.json` | Menu tree shown in the sidebar (mirrors `MENUS.md`) |
+| `creds_parser.py` | Credential vault: reads the tools' output files, dedup, cracked status, manual entries |
 | `bh_inventory.py` | BloodHound parser + AD hygiene checks (standard library only) |
 | `static/` | Dashboard (HTML/CSS/JS) and vendored xterm.js 5.5 (works offline) |
 | `run.sh` | Launcher (venv + token) |
 | `tests/check_menus.py` | Checks `menus.json` against the script |
+| `tests/test_creds_parser.py` | Tests the credential parsing on synthetic output files |
 | `tests/test_bh_inventory.py` | Tests the hygiene checks on a synthetic collection |
 | `Dockerfile.webui` | Image with all linWinPwn tools plus the web UI |
 

@@ -39,6 +39,7 @@ from flask import Flask, request, jsonify, send_from_directory, abort, Response
 from flask_sock import Sock
 
 from bh_inventory import Inventory
+from creds_parser import CredVault
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
@@ -62,6 +63,7 @@ app.config["MAX_CONTENT_LENGTH"] = BH_MAX_UPLOAD
 sock = Sock(app)
 
 BH_REPORT = {"data": None, "inv": None}      # last inventory report + object
+CREDS = {"vault": None}                       # credential vault
 
 
 # --------------------------------------------------------------------------- #
@@ -765,6 +767,131 @@ def api_bh_export():
     fname = f"ad-hygiene-{time.strftime('%Y%m%d-%H%M')}.md"
     return Response(md, mimetype="text/markdown",
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+# --------------------------------------------------------------------------- #
+# Credential vault (reads what the tools already wrote to the output folder)
+# --------------------------------------------------------------------------- #
+def _creds_vault(rescan=False):
+    if rescan or not CREDS["vault"]:
+        v = CredVault(DEFAULT_OUTPUT)
+        v.scan()
+        v.load_overlay()
+        CREDS["vault"] = v
+    return CREDS["vault"]
+
+
+@app.route("/api/creds/scan")
+def api_creds_scan():
+    v = _creds_vault(rescan=True)
+    return jsonify({"ok": True, **v.report(reveal=False)})
+
+
+@app.route("/api/creds/report")
+def api_creds_report():
+    v = _creds_vault()
+    return jsonify({"ok": True, **v.report(reveal=False)})
+
+
+@app.route("/api/creds/reveal")
+def api_creds_reveal():
+    v = _creds_vault()
+    rec = v.record(request.args.get("key", ""), reveal=True)
+    if not rec:
+        return jsonify({"ok": False, "error": "unknown record"}), 404
+    return jsonify({"ok": True, "record": rec})
+
+
+@app.route("/api/creds/add", methods=["POST"])
+def api_creds_add():
+    body = request.get_json(force=True, silent=True) or {}
+    rtype = body.get("type", "ntlm")
+    user = (body.get("username") or "").strip()
+    value = (body.get("value") or "").strip()
+    if not user or not value:
+        return jsonify({"ok": False, "error": "username and value are required"}), 400
+    v = _creds_vault()
+    rec = v._add(rtype, user, value, "manual entry",
+                 domain=(body.get("domain") or "").strip(), rid=(body.get("rid") or "").strip())
+    if not rec:
+        return jsonify({"ok": False, "error": "could not add"}), 400
+    rec["manual"] = True
+    if body.get("notes"):
+        rec["notes"] = body["notes"]
+    if body.get("cracked"):
+        rec["cracked"] = body["cracked"]
+    v.save_overlay()
+    return jsonify({"ok": True, "key": rec["key"], **v.report(reveal=False)})
+
+
+@app.route("/api/creds/update", methods=["POST"])
+def api_creds_update():
+    body = request.get_json(force=True, silent=True) or {}
+    v = _creds_vault()
+    rec = v.records.get(body.get("key", ""))
+    if not rec:
+        return jsonify({"ok": False, "error": "unknown record"}), 404
+    if "notes" in body:
+        rec["notes"] = str(body["notes"])[:2000]
+    if "cracked" in body:
+        rec["cracked"] = (str(body["cracked"]) or None) if body["cracked"] else None
+    v.save_overlay()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/creds/delete", methods=["POST"])
+def api_creds_delete():
+    body = request.get_json(force=True, silent=True) or {}
+    v = _creds_vault()
+    rec = v.records.get(body.get("key", ""))
+    if not rec:
+        return jsonify({"ok": False, "error": "unknown record"}), 404
+    if not rec["manual"]:
+        return jsonify({"ok": False, "error": "only manual entries can be deleted; parsed ones come back on rescan"}), 400
+    del v.records[rec["key"]]
+    v.save_overlay()
+    return jsonify({"ok": True, **v.report(reveal=False)})
+
+
+@app.route("/api/creds/export.csv")
+def api_creds_csv():
+    import csv, io
+    reveal = request.args.get("reveal") == "1"
+    v = _creds_vault()
+    rep = v.report(reveal=reveal)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["type", "domain", "username", "rid", "value", "cracked", "sources", "notes"])
+    for r in rep["records"]:
+        val = r["value"]
+        if isinstance(val, str) and val[:1] in ("=", "+", "-", "@"):
+            val = "'" + val
+        w.writerow([r["type"], r["domain"], r["username"], r["rid"], val,
+                    r["cracked"] or "", "; ".join(r["sources"]), r["notes"]])
+    fn = f"credentials-{'full' if reveal else 'masked'}-{time.strftime('%Y%m%d-%H%M')}.csv"
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+
+
+@app.route("/api/creds/export.md")
+def api_creds_md():
+    reveal = request.args.get("reveal") == "1"
+    v = _creds_vault()
+    rep = v.report(reveal=reveal)
+    st = rep["stats"]
+    L = ["# Credentials recovered", "",
+         f"Generated {time.strftime('%Y-%m-%d %H:%M')}" + ("" if reveal else "  (values masked)"), "",
+         f"- {st['total']} secrets across {st['users']} accounts",
+         f"- {st['cracked']} cracked or in cleartext",
+         f"- by type: " + ", ".join(f"{k} {n}" for k, n in st["by_type"].items()), "",
+         "| Type | Account | Value | Cracked | Source |",
+         "|---|---|---|---|---|"]
+    for r in rep["records"]:
+        acct = (r["domain"] + "\\" if r["domain"] else "") + r["username"]
+        L.append(f"| {r['type']} | {acct} | `{r['value']}` | {r['cracked'] or ''} | {r['sources'][0] if r['sources'] else ''} |")
+    fn = f"credentials-{'full' if reveal else 'masked'}-{time.strftime('%Y%m%d-%H%M')}.md"
+    return Response("\n".join(L), mimetype="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="{fn}"'})
 
 
 # --------------------------------------------------------------------------- #

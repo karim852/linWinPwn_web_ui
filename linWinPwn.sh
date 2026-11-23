@@ -250,9 +250,9 @@ while test $# -gt 0; do
         ;; #leave empty for anonymous login
     -p)
         password="${2}"
-        if [ ! "${password}" == "" ]; then pass_bool=true; fi
+        pass_bool=true
         shift
-        ;; #password
+        ;; #password (an explicit -p "" means authenticate with an empty password)
     -H)
         hash="${2}"
         if [ ! "${hash}" == "" ]; then hash_bool=true; fi

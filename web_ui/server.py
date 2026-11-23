@@ -225,7 +225,6 @@ def build_argv(cfg):
     simple = {
         "domain": "-d",
         "user": "-u",
-        "password": "-p",
         "hash": "-H",
         "aeskey": "-A",
         "kerb": "-K",
@@ -244,6 +243,16 @@ def build_argv(cfg):
         val = (cfg.get(key) or "").strip()
         if val:
             argv += [flag, val]
+
+    # Password: an empty field with a username means "-p \"\"", i.e. authenticate
+    # with an empty password (e.g. guest). Without a username it stays a null session,
+    # so -p is omitted. A non-empty password is always passed.
+    pw = cfg.get("password")
+    if pw:
+        argv += ["-p", pw.strip() if isinstance(pw, str) else pw]
+    elif "password" in cfg and (cfg.get("user") or "").strip() and not any(
+            (cfg.get(k) or "").strip() for k in ("hash", "aeskey", "kerb", "cert")):
+        argv += ["-p", ""]
 
     flags = {
         "ldaps": "--ldaps",
@@ -363,7 +372,7 @@ def _start(cfg):
     redact_next = False
     for a in argv:
         if redact_next:
-            shown.append("********")
+            shown.append("********" if a else "")   # empty password: nothing to hide
             redact_next = False
         elif a in ("-p", "-H", "-A", "--cert-pass"):
             shown.append(a)

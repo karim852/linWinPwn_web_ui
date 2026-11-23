@@ -396,6 +396,8 @@ function note(msg){ lwpTerm.term.write(`\r\n\x1b[33m[web] ${msg}\x1b[0m\r\n`); }
    sorted by type, the answers given in the forms, files produced.
    Fed line by line from the same stream as the terminal. */
 let OUTPUT_DIR = "";
+const BANNER_RE = /^(linWinPwn:? version|https?:\/\/github\.com\/lefayjey|Author\s*:|Inspired by\s*:)/i;
+function isArt(t) { const stripped = t.replace(/[\s|_/\\()<>VW.^~`'*=+-]/g, ""); return t.length > 3 && stripped.length <= 2; }
 let IN_MENU = false;          // inside a menu listing (not results)
 let RES = [];                 // entries and separators, oldest first
 let CUR_ENTRY = null;
@@ -472,7 +474,7 @@ function resNew(kind, label, menu, key, need) {
   if (CUR_ENTRY && (CUR_ENTRY.status === "running" || CUR_ENTRY.status === "waiting"))
     resClose("done");
   RES.forEach(e => { if (e.kind && !e.userToggled) { e.open = false; resMark(e); } });
-  const e = {id: ++RES_SEQ, kind, label, menu: menu || "", key: key || "", status: "running",
+  const e = {id: ++RES_SEQ, kind, label, menu: menu || "", key: key || "", status: kind === "log" ? "log" : "running",
              started: Date.now(), ended: null, cmds: [], lines: [], qa: [], files: [],
              counts: {ok:0, err:0, warn:0}, need: need || 0, seen: 0,
              open: true, userToggled: false, showAll: false, el: null};
@@ -488,11 +490,32 @@ function resClose(status) {
   CUR_ENTRY = null;
 }
 function resSep(text) { RES.push({sep: true, text, id: ++RES_SEQ}); resRenderAll(); }
+function resSessionHeader(j, cfg) {
+  cfg = cfg || {};
+  const authName = cfg.hash ? "NTLM hash" : cfg.kerb ? "Kerberos ticket" : cfg.aeskey ? "AES key"
+    : cfg.cert ? "certificate" : (cfg.user && (cfg.password || cfg.password === "")) ? "password" : null;
+  const bits = [];
+  bits.push(`<b>${esc(cfg.target || "?")}</b>`);
+  if (cfg.domain) bits.push(esc(cfg.domain));
+  if (cfg.user) bits.push(`user <b>${esc(cfg.user)}</b>` +
+    (authName === "password" && !cfg.password ? " · empty password" : authName ? " · " + authName : ""));
+  else bits.push("null session");
+  if (cfg.auto) bits.push(`<span class="hdr-tag">auto</span>`);
+  if (cfg.no_exec) bits.push(`<span class="hdr-tag">no-exec</span>`);
+  if (cfg.offline) bits.push(`<span class="hdr-tag">offline</span>`);
+  const html = `<span class="hdr-dot"></span><span class="hdr-time">${new Date().toLocaleTimeString()}</span>` +
+    `<span class="hdr-sep">session started</span>` + bits.map(b => `<span class="hdr-bit">${b}</span>`).join("");
+  const tmp = document.createElement("div"); tmp.innerHTML = bits.join(" · ");
+  RES.push({sep: true, html, text: "Session started · " + tmp.textContent, id: ++RES_SEQ});
+  resRenderAll();
+}
 
 function feedLine(raw) {
   const t = raw.replace(/\s+$/, ""), tr = t.trim();
   if (!tr) return;
   if (/^\[(web|web-ui)\]/.test(tr) || /^\[linWinPwn session not started/.test(tr)) return;
+  if (BANNER_RE.test(tr) || isArt(tr)) return;                 // hide the ASCII banner
+  if (/^\[\+\]\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/.test(tr)) return;   // the startup date line
   if (/\[[A-Za-z0-9 ]+ menu\]/.test(tr)) { IN_MENU = true; return; }
   if (/^>{1,2}( |$)/.test(tr)) {                 // echo of a menu choice / answer
     if (/^> \S/.test(tr) && CUR_ENTRY) CUR_ENTRY.seen++;
@@ -506,7 +529,7 @@ function feedLine(raw) {
   const cm = tr.match(/\[i\] (?:Running|Printing) command: (.+)$/);
   if (cm) {
     const cmd = cm[1].trim();
-    if (!CUR_ENTRY || CUR_ENTRY.kind === "auto" || CUR_ENTRY.kind === "session") {
+    if (!CUR_ENTRY || CUR_ENTRY.kind === "auto" || CUR_ENTRY.kind === "log") {
       // name the card after the "[*] ..." line announced just before, else tool + key option
       let label = "";
       if (PENDING && LINE_NO - PENDING.no <= 2) {
@@ -522,7 +545,7 @@ function feedLine(raw) {
     findFiles(cmd).forEach(f => CUR_ENTRY.files.includes(f) || CUR_ENTRY.files.push(f));
     resMark(CUR_ENTRY); return;
   }
-  if (!CUR_ENTRY) resNew("session", "Session output", "", "", 0);
+  if (!CUR_ENTRY) resNew("log", "", "", "", 0);
   const c = classify(tr);
   const line = {t, c};
   CUR_ENTRY.lines.push(line);
@@ -555,11 +578,12 @@ function resRenderAll() {
   RES.forEach(e => { e.el = null; });
   RES.forEach(e => {
     e.el = document.createElement("div"); list.appendChild(e.el);
-    if (e.sep) { e.el.className = "res-sep"; e.el.textContent = e.text; } else resPaint(e);
+    resPaint(e);
   });
   resCountUpdate();
 }
 function resMatches(e) {
+  if (e.kind === "log" && RES_STATUS !== "all") return false;
   if (RES_STATUS === "running" && !(e.status === "running" || e.status === "waiting")) return false;
   if (RES_STATUS === "done" && e.status !== "done") return false;
   if (RES_STATUS === "issues" && !(e.counts.err || e.status === "stopped")) return false;
@@ -571,7 +595,16 @@ function resMatches(e) {
 function fmtDur(ms) { const s = Math.round(ms/1000); return s < 60 ? s + "s" : Math.floor(s/60) + "m" + String(s%60).padStart(2,"0"); }
 function resPaint(e) {
   const el = e.el;
-  if (e.sep) { el.className = "res-sep"; el.textContent = e.text; return; }
+  if (e.sep) { el.className = "res-sep"; if (e.html) el.innerHTML = e.html; else el.textContent = e.text; return; }
+  if (e.kind === "log") {
+    el.className = "rc-log";
+    el.style.display = resMatches(e) ? "" : "none";
+    const LIM = 200, lines = e.showAll ? e.lines : e.lines.slice(-LIM), hidden = e.lines.length - lines.length;
+    el.innerHTML = (hidden ? `<div class="rc-more" data-more="1">show ${hidden} earlier lines</div>` : "") +
+      lines.map(l => `<div class="ol ${l.c}"><span class="ic">${OL_ICON[l.c]}</span><span>${esc(mask(l.t))}</span></div>`).join("");
+    const more = el.querySelector("[data-more]"); if (more) more.onclick = () => { e.showAll = true; resPaint(e); };
+    return;
+  }
   el.className = "rc " + e.status;
   el.style.display = resMatches(e) ? "" : "none";
   const t0 = new Date(e.started).toLocaleTimeString();
@@ -1203,7 +1236,7 @@ function afterStart(j) {
   qs("#cfgBar").classList.add("running");
   if (CUR_ENTRY) resClose("done");
   IN_MENU = false; AUTO_SECTION = ""; PENDING = null;
-  resSep(`session started ${new Date().toLocaleTimeString()} · ${j.cmdline.replace(/^\/bin\/bash \S+\s*/, "linWinPwn.sh ")}`);
+  resSessionHeader(j, LAST_CFG);
   const auto = (LAST_CFG && LAST_CFG.auto) || /--auto\b/.test(j.cmdline);
   if (auto) { qs("#railDesc").textContent = "Auto mode: linWinPwn runs every default enumeration by itself. Buttons are off; follow the Results."; setView("results"); }
 }

@@ -12,13 +12,13 @@ More screenshots in [docs/screenshots](docs/screenshots): [session bar](docs/scr
 
 ## Features
 
-- **Session bar at the top, always visible**: target DC, domain, user, the 5 auth methods (password, NTLM hash, Kerberos ticket, AES key, PFX cert), the **mode** (Interactive or Auto `--auto`) and Start/Restart. Every other CLI flag (`-T`, `-I`, `-a`, DNS IP, LDAP port, wordlists, output dir, `--ldaps`, `--ldap-sign`, `--ldap-bind`, `--force-kerb`, `--use-ip`, `--dns-tcp`, `--auto-config`, `--verbose`, `--no-exec`, `--offline`) sits in the **⚙ Advanced** dropdown, with a badge counting what is set. Press Enter in any field to start. The form is remembered in the browser between reloads, passwords and keys excepted.
+- **Session bar at the top, always visible**: target DC, domain, user, the 5 auth methods (password, NTLM hash, Kerberos ticket, AES key, PFX cert), the **mode** (Interactive or Auto `--auto`) and Start/Restart. Every other CLI flag (`-T`, `-I`, `-a`, DNS IP, LDAP port, wordlists, output dir, `--ldaps`, `--ldap-sign`, `--ldap-bind`, `--force-kerb`, `--use-ip`, `--dns-tcp`, `--auto-config`, `--verbose`, `--no-exec`, `--offline`) sits in the **⚙ Advanced** dropdown, with a badge counting what is set. A user with an empty password field logs in with an empty password (`-p ''`), handy for `guest`; leave the user empty too for a null session. Press Enter in any field to start. The form is remembered in the browser between reloads, passwords and keys excepted.
 - **Two modes**:
   - *Interactive*: you drive linWinPwn from the module buttons.
   - *Auto (`--auto`)*: linWinPwn runs every default enumeration by itself; you follow it in the Results view.
 - **Module sidebar**: all menus with a filter box. Each action has badges: `noisy`, `batch` (the `A` option of each menu), `form` (asks questions) and `console` (opens an interactive tool).
 - **Two views of the output, your choice** (switch at the top right of the linWinPwn tab, remembered):
-  - **▤ Results**: no terminal. Each action becomes a card: menu and action name, status (running, waiting for your answer, done, stopped), the commands it ran (with copy buttons), the output sorted into success / warning / error / info lines, the answers you gave in the forms, and the files it produced (click to open them in Output / loot). Menu listings are filtered out. In Auto mode the cards are named after what the script announces (`DC List Enumeration`, `Get MachineAccountQuota`...) and grouped by its sections. Search, status filter (running / done / issues), expand/collapse all, export to Markdown. Passwords and keys from your session are masked in cards and exports. Cards survive a page reload.
+  - **▤ Results**: no terminal. Each action becomes a card: menu and action name, status (running, waiting for your answer, done, stopped), the commands it ran (with copy buttons), the output sorted into success / warning / error / info lines, the answers you gave in the forms, and the files it produced (click to open them in Output / loot). Menu listings, the ASCII banner and the version lines are filtered out; plain session output flows as borderless lines, and each session opens with a one-line header (time, target, domain, user and auth type, mode tags), never the secret. In Auto mode the cards are named after what the script announces (`DC List Enumeration`, `Get MachineAccountQuota`...) and grouped by its sections. Search, status filter (running / done / issues), expand/collapse all, export to Markdown. Passwords and keys from your session are masked in cards and exports. Cards survive a page reload.
   - **⌨ Terminal**: the raw linWinPwn output (xterm.js, colours kept), with optional typing.
 - **Web forms for every question**: the UI reads the output and shows the right form under it:
   - text question, with the default value shown and a "Use default" button
@@ -119,6 +119,7 @@ This console runs offensive tooling and gives a full shell with the rights of th
 | `tests/check_menus.py` | Checks `menus.json` against the script |
 | `tests/test_creds_parser.py` | Tests the credential parsing on synthetic output files |
 | `tests/test_bh_inventory.py` | Tests the hygiene checks on a synthetic collection |
+| `tests/test_argv.py` | Tests how the session form becomes linWinPwn arguments (run with the venv, it imports the server) |
 | `Dockerfile.webui` | Image with all linWinPwn tools plus the web UI |
 
 When linWinPwn adds new menu options, add them to `menus.json` (key + label), then run:
@@ -133,4 +134,11 @@ The BloodHound inventory has its own tests (75 assertions on a synthetic collect
 
 ```bash
 python3 web_ui/tests/test_bh_inventory.py
+```
+
+The credential parser and the session arguments are tested the same way:
+
+```bash
+python3 web_ui/tests/test_creds_parser.py
+web_ui/.venv/bin/python web_ui/tests/test_argv.py
 ```

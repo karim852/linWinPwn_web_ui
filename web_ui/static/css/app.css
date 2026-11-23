@@ -518,3 +518,16 @@ input:focus{border-color:var(--acc);box-shadow:0 0 0 2px rgba(57,208,216,.15)}
 .cred-form select{background:var(--bg2);border:1px solid var(--line2);color:var(--txt);border-radius:7px;padding:7px 9px;font-size:13px}
 .cred-form-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
 .cred-empty-row td{color:var(--dim);text-align:center;padding:24px}
+
+/* ===== Results: smooth timeline (borderless session log + session header) ===== */
+.rc-log{padding:2px 2px 8px;font-family:var(--mono);font-size:11.5px;line-height:1.55}
+.rc-log .ol{padding:1px 8px}
+.res-sep .hdr-dot{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block;flex-shrink:0}
+.res-sep{gap:9px}
+.hdr-time{color:var(--dim);font-family:var(--mono);font-size:11px}
+.hdr-sep{color:var(--dim);text-transform:uppercase;letter-spacing:.6px;font-size:10px}
+.hdr-bit{color:var(--muted);font-size:12px}
+.hdr-bit b{color:var(--txt);font-family:var(--mono)}
+.hdr-tag{font-size:9.5px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.4px;
+  background:var(--accd);color:var(--acc);border-radius:4px;padding:1px 5px}
+.res-sep::before,.res-sep::after{max-width:40px}
